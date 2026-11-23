@@ -264,7 +264,7 @@ function viewPortal() {
       <select name="pid" aria-label="Paciente" required><option value="" disabled selected>${list && !list.length ? "Sin pacientes disponibles" : "Selecciona tu nombre"}</option>${opts}</select>
       <input type="password" name="pw" placeholder="Contraseña" autocomplete="current-password" aria-label="Contraseña" required>
       <button class="primary" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? "Verificando…" : "Entrar"}</button>
-      <div class="err" id="portalErr">${esc(state.portalError || msg)}</div></form><div class="gate-ver">Versión 13</div></div></main>`;
+      <div class="err" id="portalErr">${esc(state.portalError || msg)}</div></form><div class="gate-ver">Versión 14</div></div></main>`;
 }
 
 async function loadPortalList() {
@@ -374,7 +374,15 @@ function publishPatient(pat) {
       for (const f of state.files.filter((x) => x.patientId === pat.id && reports.some((r) => r.fileHash === x.hash))) pdfs.push({ hash: f.hash, bytes: await getPdfBytes(f) });
       const out = await buildBundle(pat, reports, weights, pw, pdfs);
       pat.published = { label, id: out.id }; await savePatient(pat);
-      const lista = (await db.all("patients")).filter((x) => x.published?.id && x.published?.label).map((x) => ({ id: x.published.id, label: x.published.label }));
+      // La lista se arma con los pacientes publicados desde este dispositivo y los que ya están en la lista publicada del sitio,
+      // para que publicar a uno nuevo nunca saque de la lista a los anteriores.
+      const porId = new Map();
+      try {
+        const res = await fetch("./data/pacientes.json", { cache: "no-store" });
+        if (res.ok) for (const x of (await res.json()).pacientes || []) if (x?.id && x?.label) porId.set(x.id, { id: x.id, label: x.label });
+      } catch { /* sin conexión o sin lista publicada todavía */ }
+      for (const x of await db.all("patients")) if (x.published?.id && x.published?.label) porId.set(x.published.id, { id: x.published.id, label: x.published.label });
+      const lista = [...porId.values()];
       const zip = makeZip([{ name: `pacientes.json`, data: new TextEncoder().encode(JSON.stringify({ v: 1, pacientes: lista })) },
         { name: `${out.id}.json`, data: new TextEncoder().encode(out.json) }, ...out.files]);
       file = new File([zip], `resultados-${out.id.slice(0, 8)}.zip`, { type: "application/zip" });

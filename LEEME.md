@@ -119,3 +119,7 @@ En Análisis e Histórico hay un selector «Agrupar por: Estudio / Sistema u ór
 # Formato agregado: laboratorio con sistema PasNet (versión 13)
 
 Lee el informe «Resultados» con columnas Estudio, Resultado, Unidades y Valores de referencia (hematología con diferencial en porcentaje y absolutos, química, perfil de lípidos y orina con resultados cualitativos). Toma del encabezado el paciente, la fecha de registro, el sexo, la fecha de nacimiento y el folio. Los nombres y las unidades se estandarizan igual que en los demás laboratorios (por ejemplo `K/uL` pasa a `10³/µL`, «Granulocitos GRA» a «Neutrófilos» y «UREA/BUN» a «Urea»). El PDF no trae el nombre del laboratorio; aparece como «Laboratorio clínico (sistema PasNet)» y se cambia en `LAB_PROFILES` de `js/parser.js`.
+
+# Varios pacientes en la lista de acceso (versión 14)
+
+Al publicar, `pacientes.json` suma a los pacientes que ya están en la lista publicada del sitio (`data/pacientes.json`) y a los publicados desde este dispositivo, por lo que publicar a un paciente nuevo ya no saca a los anteriores. Para que funcione, abre la aplicación de administrador desde la dirección real del sitio (`https://usuario.github.io/repositorio/#admin`). Un paciente publicado con versiones anteriores a la 10 no está en la lista: vuelve a publicarlo una vez. Para quitar a un paciente, borra sus archivos de `data`, quita su línea de `pacientes.json` y haz Commit y Push antes de publicar a otro.
