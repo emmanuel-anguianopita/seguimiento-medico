@@ -181,3 +181,4 @@ table.hist th.latest small { display: block; color: var(--accent); font-weight: 
 .gate-form button { padding: 13px; letter-spacing: .06em; }
 .gate-form .err { min-height: 20px; text-align: center; }
 .cheer { margin: 12px 0 4px; padding: 10px 12px; border-left: 3px solid var(--ok); background: color-mix(in srgb, var(--ok) 9%, transparent); border-radius: 8px; font-size: 14px; font-style: italic; }
+.gate-ver { margin-top: 18px; font-size: 11px; color: var(--muted); opacity: .6; letter-spacing: .08em; }

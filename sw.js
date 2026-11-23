@@ -1,5 +1,5 @@
 // Service worker: guarda la aplicación completa para que funcione sin conexión y sin depender de ningún servidor.
-const CACHE = "seguimiento-medico-v10";
+const CACHE = "seguimiento-medico-v11";
 const ASSETS = [
   "./", "./index.html", "./manifest.webmanifest", "./css/app.css",
   "./js/app.js", "./js/crypto.js", "./js/parser.js", "./js/composition.js", "./js/systems.js", "./js/cycle.js", "./js/progress.js", "./js/publish.js", "./js/zip.js", "./js/pdftext.js", "./js/db.js", "./js/charts.js",
@@ -17,19 +17,16 @@ self.addEventListener("activate", (e) => {
   );
 });
 
-// Primero la copia guardada; si no existe, la red. Se actualiza en segundo plano.
+// Primero la red (para que las actualizaciones se vean de inmediato); sin conexión, la copia guardada.
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== "GET" || url.origin !== location.origin) return;
   if (url.pathname.includes("/data/")) return;   // los resultados publicados siempre se piden a la red, nunca se guardan
   e.respondWith(
-    caches.match(req, { ignoreSearch: true }).then((hit) => {
-      const net = fetch(req).then((res) => {
-        if (res.ok) caches.open(CACHE).then((c) => c.put(req, res.clone()));
-        return res;
-      }).catch(() => hit);
-      return hit || net.then((r) => r || caches.match("./index.html"));
-    })
+    fetch(req, { cache: "no-cache" }).then((res) => {
+      if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
+      return res;
+    }).catch(() => caches.match(req, { ignoreSearch: true }).then((hit) => hit || caches.match("./index.html")))
   );
 });
