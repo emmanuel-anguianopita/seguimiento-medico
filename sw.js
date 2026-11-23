@@ -1,5 +1,5 @@
 // Service worker: guarda la aplicación completa para que funcione sin conexión y sin depender de ningún servidor.
-const CACHE = "seguimiento-medico-v12";
+const CACHE = "seguimiento-medico-v13";
 const ASSETS = [
   "./", "./index.html", "./manifest.webmanifest", "./css/app.css",
   "./js/app.js", "./js/crypto.js", "./js/parser.js", "./js/composition.js", "./js/systems.js", "./js/cycle.js", "./js/progress.js", "./js/publish.js", "./js/zip.js", "./js/pdftext.js", "./js/db.js", "./js/charts.js",

@@ -42,7 +42,7 @@ const collapse = (s) => s.replace(/\s+/g, " ").trim();
 // pdf.js entrega la letra griega mu (U+03BC); los PDF de referencia usan el signo de micro (U+00B5).
 const UNIT_EXTRA = [[/^x?\s*10\^6\s*\/\s*[uµ]l$/i, "10⁶/µL"], [/^x?\s*10\^3\s*\/\s*[uµ]l$/i, "10³/µL"], [/^gr\/dl$/i, "g/dL"],
   [/^u\/ml\.?$/i, "U/mL"], [/^ui\/ml$/i, "UI/mL"], [/^uui\/ml$/i, "µUI/mL"], [/^mg\/dl$/i, "mg/dL"], [/^ng\/dl$/i, "ng/dL"], [/^mm\/hr$/i, "mm/h"],
-  [/^meq\/l$/i, "mmol/L"], [/^mL\/min\/1\.73\s?m(?:2|²)$/i, "mL/min/1.73 m²"], [/^[uµ]g\/dl$/i, "µg/dL"]];
+  [/^meq\/l$/i, "mmol/L"], [/^k\/[uµ]l$/i, "10³/µL"], [/^m\/[uµ]l$/i, "10⁶/µL"], [/^fl$/i, "fL"], [/^g\/dl$/i, "g/dL"], [/^leu\/[uµ]l$/i, "Cel/µL"], [/^x campo$/i, "por campo"], [/^mL\/min\/1\.73\s?m(?:2|²)$/i, "mL/min/1.73 m²"], [/^[uµ]g\/dl$/i, "µg/dL"]];
 const normUnit = (u) => {
   const t = collapse(u.replace(/\u03BC/g, "\u00B5"));
   if (UNIT_MAP[t] !== undefined) return UNIT_MAP[t];
@@ -116,6 +116,28 @@ function parseC(line) {
   const unit = unitRes || unitRef.trim();
   if (unit.length > 18) return null;
   return { name, valueText: mv[1].replace(/\s/g, ""), flag: false, unit, kind, g1, g2 };
+}
+
+/** Estilo D (sistema PasNet): la referencia va en la línea anterior, «Nombre   resultado» en la fila y la unidad en la línea siguiente. */
+const UNIT_LINE = /^(%|fl|pg|x campo|[A-Za-zµμ]+\/[A-Za-zµμ0-9.^³]+)$/i;
+const WORD = /^[A-Za-zÁÉÍÓÚÑáéíóúñ]+(?: [A-Za-zÁÉÍÓÚÑáéíóúñ]+)?$/;
+function parseD(lines, i) {
+  const cells = lines[i].split(/\s{3,}/).map((c) => c.trim());
+  if (cells.length !== 2) return null;
+  const name = collapse(cells[0]), val = cells[1];
+  if ([...name].filter((c) => /\p{L}/u.test(c)).length < 2 || /:/.test(name) || name.length > 45 || /^(estudio|paciente|doctor)\b/i.test(name)) return null;
+  const numeric = /^[<>]?\s?\d+(?:\.\d+)?$/.test(val);
+  if (!numeric && !WORD.test(val) && !/^\d+\s?-\s?\d+$/.test(val)) return null;
+  const prev = (lines[i - 1] || "").trim(), next = (lines[i + 1] || "").trim();
+  let unit = UNIT_LINE.test(next) ? next : "", kind = "text", g1 = "", g2 = "", flag = false, m;
+  const pc = prev.split(/\s{3,}/).map((c) => c.trim());
+  if (pc.length === 2 && pc[0] === "(*)") { flag = true; if (!unit && UNIT_LINE.test(pc[1])) unit = pc[1]; }
+  else if ((m = /^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)$/.exec(prev))) { kind = "range"; g1 = m[1]; g2 = m[2]; }
+  else if ((m = /^Hasta\s+(\d+(?:\.\d+)?)$/i.exec(prev))) { kind = "cmp"; g1 = "≤"; g2 = m[1]; }
+  else if ((m = /^(<|>)\s*(\d+(?:\.\d+)?)$/.exec(prev))) { kind = "cmp"; g1 = m[1]; g2 = m[2]; }
+  else if (/^[A-Za-zÁÉÍÓÚÑáéíóúñ]+$/.test(prev) && !numeric) { g1 = prev; flag = stem(val) !== stem(prev); }
+  if (!numeric && unit !== "x campo") unit = "";   // en resultados cualitativos la unidad solo describe el umbral
+  return { name, valueText: val, flag, unit, kind, g1, g2 };
 }
 
 /** Orina de Chopo: nombre | resultado cualitativo | referencia (que puede venir partida en varias columnas). */
@@ -344,6 +366,16 @@ al("Transferrina", "Transferrina sérica");
 al("LDL pequeñas y densas (sdLDL)", "sd LDL", "sdLDL", "LDL pequeñas y densas");
 al("Lípidos totales", "Lípidos totales en suero");
 al("Fosfolípidos", "Fosfolípidos en suero", "Fosfolipidos");
+al("Leucocitos", "Leucocitos WBC");
+al("Linfocitos", "Linfocitos LYM", "Linfocitos LYM #", "Linfocitos LYM %");
+al("Monocitos", "Monocitos MID", "MID", "Monocitos MID #", "Monocitos MID %");
+al("Neutrófilos", "Granulocitos", "Granulocitos GRA", "GRA", "Granulocitos GRA #", "Granulocitos GRA %");
+al("Eosinófilos", "EO", "EO #", "EO %"); al("Basófilos", "BA", "BA #", "BA %");
+al("Eritrocitos", "Eritrocitos RBC"); al("Hemoglobina", "Hemoglobina HGB"); al("Hematocrito", "Hematocrito HCT");
+al("Plaquetas", "Plaquetas PLT"); al("Plaquetocrito (PCT)", "PCT", "Plaquetocrito");
+al("Urea", "UREA/BUN", "Urea BUN");
+al("Colesterol HDL", "Colesterol de alta densidad HDL");
+al("Colesterol LDL", "Colesterol de baja densidad LDL");
 const DIFF = new Set(["Neutrófilos", "Linfocitos", "Monocitos", "Eosinófilos", "Basófilos"].map(norm));
 
 // Orina: los mismos nombres significan otra cosa que en sangre (por ejemplo, «Bilirrubina»)
@@ -365,7 +397,7 @@ alo("Eritrocitos dismórficos", "Eritrocitos dismorficos");
 alo("Cilindros", "Cilindros urinarios");
 alo("Células epiteliales escamosas", "Células pavimentosas", "Células escamosas", "Células epiteliales planas");
 alo("Células epiteliales no escamosas", "Células de transición", "Células tubulares renales", "Células transicionales");
-alo("Filamento mucoide", "Redes mucoides", "Moco", "Hilos de moco", "Filamentos mucoides");
+alo("Filamento mucoide", "Hilo mucoso", "Redes mucoides", "Moco", "Hilos de moco", "Filamentos mucoides");
 alo("Aspecto", "Turbidez", "Transparencia");
 alo("Cristales", "Cristales urinarios");
 alo("Bacterias");
@@ -390,7 +422,7 @@ function sentence(raw) {
 }
 
 function canonical(raw, unit, section) {
-  const pct = raw.includes("(%)");
+  const pct = raw.includes("(%)") || /%\s*$/.test(raw);
   const n = norm(raw);
   let display = (section === "Orina" ? (ORINA[n] ?? looseOrina(raw)) : null) ?? ALIASES[n] ?? looseIndex().get(loose(raw)) ?? sentence(raw.replace("(%)", "").trim());
   if (DIFF.has(norm(display))) display += pct || unit === "%" ? " (%)" : " (absolutos)";
@@ -408,7 +440,7 @@ export function restandardize(r) {
 
 const SECTION_RULES = [["BIOMETRIA HEMATICA", "Hematología"], ["HEMATOLOGIA", "Hematología"], ["QUIMICA CLINICA", "Química clínica"],
   ["UROANALISIS", "Orina"], ["EXAMEN GENERAL DE ORINA", "Orina"], ["EXAMEN FISICO", "Orina"], ["EXAMEN QUIMICO", "Orina"],
-  ["EXAMEN MICROSCOPICO", "Orina"]];
+  ["EXAMEN MICROSCOPICO", "Orina"], ["BIOMETRIA HEMATICA COMPLETA", "Hematología"], ["EXAMEN MACROSCOPICO", "Orina"], ["EXAMEN FISICO QUIMICO", "Orina"]];
 const BOILER = ["RESULTADOS", "ANALISIS CLINICOS", "GRUPO", "SUCURSAL", "WWW", "BEETHOVEN", "ZAPOPAN", "ACREDITACION",
   "GRACIAS", "INFORME", "PRUEBA", "AVISO", "DESCARGA", "RECUERDE"];
 
@@ -443,6 +475,7 @@ export const LAB_PROFILES = [
   { id: "chopo", lab: "Chopo", rowStyle: "B", groupTitles: true, detect: (t) => t.includes("chopo") || t.includes("(lr)") },
   { id: "udg", lab: "Laboratorio Universidad de Guadalajara", rowStyle: "C", groupTitles: false, defaultSection: "Inmunología", titleSections: true,
     detect: (t) => t.includes("valores de referencia") && /nombre:[\s\S]*orden:/.test(t) },
+  { id: "pasnet", lab: "Laboratorio clínico (sistema PasNet)", rowStyle: "D", groupTitles: false, detect: (t) => t.includes("pasnet") || (t.includes("informe de resultados") && t.includes("valores de referencia") && t.includes("estudio   resultado")) },
   { id: "otero", lab: "Centro Analítico Mariano Otero", rowStyle: "A", groupTitles: false, detect: (t) => t.includes("fecha de toma") || t.includes("mariano otero") },
 ];
 export const SUPPORTED_LABS = LAB_PROFILES.map((p) => p.lab);
@@ -470,22 +503,23 @@ export function parseDocument(pages) {
   const usable = pages.filter((p) => !isSummary(p));
   for (const page of usable) for (const l of page) {
     let m;
-    if (!out.date && (m = /Fecha(?: de (?:Toma|Registro|Muestra|Recepci[oó]n))?:\s*(\d{2})\/(\d{2})\/(\d{4})/i.exec(l))) out.date = iso(m[1], m[2], m[3]);
-    if (!out.patient && (m = /(?<!ID )Paciente:\s*(.+?)(?:\s+Sexo:|$)/.exec(l))) {
+    if (!out.date && (m = /Fecha(?: de (?:Toma|Registro|Muestra|Recepci[oó]n)| y hora de registro)?\s*:\s*(\d{2})\/(\d{2})\/(\d{4})/i.exec(l))) out.date = iso(m[1], m[2], m[3]);
+    if (!out.patient && (m = /(?<!ID )Paciente\s*:\s*(.+?)(?:\s+Sexo:|$)/.exec(l))) {
       const c = m[1].replace(/,/g, " ").split(/\s+/).filter(Boolean).join(" ").toUpperCase();
       if (c) out.patient = c;
     }
     if (!out.patient && (m = /^Nombre:\s*(.+?)\s+Orden:/.exec(l))) out.patient = m[1].split(/\s+/).filter(Boolean).join(" ").toUpperCase();
-    if (!out.birth && (m = /Fecha de nacimiento:\s*(\d{2})\/(\d{2})\/(\d{4})/i.exec(l))) out.birth = iso(m[1], m[2], m[3]);
-    if (!out.sex && (m = /Sexo:\s*(Mujer|Hombre|Femenino|Masculino)/i.exec(l))) out.sex = /^(mujer|femenino)$/i.test(m[1]) ? "F" : "M";
+    if (!out.birth && (m = /Fecha de nacimiento\s*:\s*(\d{2})\/(\d{2})\/(\d{4})/i.exec(l))) out.birth = iso(m[1], m[2], m[3]);
+    if (!out.sex && (m = /Sexo(?: \/ Edad)?\s*:\s*(Mujer|Hombre|Femenino|Masculino)/i.exec(l))) out.sex = /^(mujer|femenino)$/i.test(m[1]) ? "F" : "M";
+    if (!out.folio && (m = /^\*?(LF\d+)\s*\*?$/.exec(l.trim()))) out.folio = m[1];
     if (!out.folio && (m = /(?:Folio|Orden):\s*([A-Za-z0-9]+)/.exec(l))) out.folio = m[1];
   }
   let section = profile?.defaultSection ?? "Otros";
   const seen = new Set();
-  for (const page of usable) for (const l of page) {
+  for (const page of usable) for (const [li, l] of page.entries()) {
     const sec = sectionOf(l.trim(), profile);
     if (sec) { section = sec; continue; }
-    let raw = parseRow(l, profile);
+    let raw = profile?.rowStyle === "D" ? parseD(page, li) : parseRow(l, profile);
     if (!raw && section === "Orina" && profile?.id === "chopo") raw = parseOrinaText(l);   // orina de Chopo: resultados cualitativos en tres columnas
     if (!raw) continue;
     const { key, display } = canonical(raw.name, normUnit(raw.unit), section);

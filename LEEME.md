@@ -115,3 +115,7 @@ En Análisis e Histórico hay un selector «Agrupar por: Estudio / Sistema u ór
 - Los estudios ya importados se estandarizan solos al abrirlos; no hace falta volver a importarlos.
 - Formato Chopo con «Química integral», hierro, inmunoglobulinas y orina cualitativa (Negativo, Ausentes): ahora se lee completo, y la categoría se deduce del nombre cuando el PDF no la rotula.
 - Si se importa un segundo PDF del mismo estudio (mismo paciente, laboratorio, fecha y folio), se combina con el existente en un solo informe y se conserva el PDF más completo.
+
+# Formato agregado: laboratorio con sistema PasNet (versión 13)
+
+Lee el informe «Resultados» con columnas Estudio, Resultado, Unidades y Valores de referencia (hematología con diferencial en porcentaje y absolutos, química, perfil de lípidos y orina con resultados cualitativos). Toma del encabezado el paciente, la fecha de registro, el sexo, la fecha de nacimiento y el folio. Los nombres y las unidades se estandarizan igual que en los demás laboratorios (por ejemplo `K/uL` pasa a `10³/µL`, «Granulocitos GRA» a «Neutrófilos» y «UREA/BUN» a «Urea»). El PDF no trae el nombre del laboratorio; aparece como «Laboratorio clínico (sistema PasNet)» y se cambia en `LAB_PROFILES` de `js/parser.js`.

@@ -264,7 +264,7 @@ function viewPortal() {
       <select name="pid" aria-label="Paciente" required><option value="" disabled selected>${list && !list.length ? "Sin pacientes disponibles" : "Selecciona tu nombre"}</option>${opts}</select>
       <input type="password" name="pw" placeholder="Contraseña" autocomplete="current-password" aria-label="Contraseña" required>
       <button class="primary" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? "Verificando…" : "Entrar"}</button>
-      <div class="err" id="portalErr">${esc(state.portalError || msg)}</div></form><div class="gate-ver">Versión 12</div></div></main>`;
+      <div class="err" id="portalErr">${esc(state.portalError || msg)}</div></form><div class="gate-ver">Versión 13</div></div></main>`;
 }
 
 async function loadPortalList() {
