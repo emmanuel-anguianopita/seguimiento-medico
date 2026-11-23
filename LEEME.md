@@ -74,7 +74,7 @@ En Análisis e Histórico hay un selector «Agrupar por: Estudio / Sistema u ór
 
 ## Publicar los resultados de un paciente
 1. En la aplicación (modo profesional): menú ⋯ → **Publicar resultados para el paciente**.
-2. Escribe una contraseña de al menos 10 caracteres (la misma cada vez para ese paciente) y entrégasela por otro medio.
+2. Escribe una contraseña de al menos 12 caracteres (la misma cada vez para ese paciente) y entrégasela por otro medio.
 3. Se genera un archivo `resultados-XXXX.zip`. Ábrelo: trae un archivo `.json` y una carpeta con el mismo código.
 4. Copia ambos dentro de la carpeta `data` del repositorio (créala la primera vez) y reemplaza si ya existen.
 5. En GitHub Desktop: escribe un resumen, **Commit to main** y **Push origin**.
@@ -92,3 +92,8 @@ En Análisis e Histórico hay un selector «Agrupar por: Estudio / Sistema u ór
 - Si un paciente olvida su contraseña, se publica de nuevo con otra.
 - Los datos de salud están sujetos a la ley de protección de datos personales; informa a tus pacientes con un aviso de privacidad y su consentimiento.
 - Haz una copia de respaldo con regularidad (menú ⋯ → Exportar copia de respaldo; ahora incluye los PDF).
+
+## Privacidad y buscadores
+- La página incluye etiquetas para que Google y otros buscadores **no la indexen** (`noindex`, `nofollow`, `noarchive`). Funcionan cuando el buscador visita la página, por eso no se usa un `robots.txt` que lo impida. Si la dirección ya apareció en Google, pide su retiro en Google Search Console (herramienta «Eliminaciones»).
+- No hay ningún enlace público a los archivos de pacientes y sus nombres son un código derivado del nombre del paciente.
+- Contraseñas: al menos 12 caracteres; lo ideal son 4 palabras al azar sin relación entre sí.

@@ -15,7 +15,7 @@ export async function lookupId(name) {
   return toHex(bits).slice(0, 32);
 }
 
-export const MIN_PASSWORD = 10;
+export const MIN_PASSWORD = 12;
 
 /** patient: {name, profile}; reports/weights ya descifrados; pdfs: [{hash, bytes}].
  *  Devuelve {id, json, files}: json es el archivo principal y files son los PDF cifrados (uno por informe). */
