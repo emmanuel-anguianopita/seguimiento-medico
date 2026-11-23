@@ -1,12 +1,13 @@
 // Almacenamiento local permanente (IndexedDB). Los datos nunca salen del dispositivo.
+import { b64, unb64 } from "./crypto.js";
 const NAME = "seguimiento-medico";
-const VERSION = 1;
+const VERSION = 2;
 
 const dbp = new Promise((resolve, reject) => {
   const r = indexedDB.open(NAME, VERSION);
   r.onupgradeneeded = () => {
     const d = r.result;
-    for (const s of ["patients", "reports", "weights"]) {
+    for (const s of ["patients", "reports", "weights", "files", "blobs"]) {
       if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: "id", autoIncrement: true });
     }
   };
@@ -28,13 +29,14 @@ async function tx(store, mode, fn) {
 export const all = (store) => tx(store, "readonly", (s) => s.getAll());
 export const put = (store, value) => tx(store, "readwrite", (s) => s.put(value));
 export const del = (store, id) => tx(store, "readwrite", (s) => s.delete(id));
+export const get = (store, id) => tx(store, "readonly", (s) => s.get(id));
 
 /** Escribe pacientes, informes y pesos en una sola transacción (todo o nada). */
-export async function batchWrite({ patients = [], reports = [], weights = [] }) {
+export async function batchWrite({ patients = [], reports = [], weights = [], files = [], blobs = [] }) {
   const d = await dbp;
   return new Promise((resolve, reject) => {
-    const t = d.transaction(["patients", "reports", "weights"], "readwrite");
-    for (const [name, rows] of [["patients", patients], ["reports", reports], ["weights", weights]]) {
+    const t = d.transaction(["patients", "reports", "weights", "files", "blobs"], "readwrite");
+    for (const [name, rows] of [["patients", patients], ["reports", reports], ["weights", weights], ["files", files], ["blobs", blobs]]) {
       const store = t.objectStore(name);
       for (const r of rows) store.put(r);
     }
@@ -45,7 +47,7 @@ export async function batchWrite({ patients = [], reports = [], weights = [] }) 
 }
 
 export async function deletePatient(id) {
-  for (const store of ["reports", "weights"]) {
+  for (const store of ["reports", "weights", "files", "blobs"]) {
     for (const row of await all(store)) if (row.patientId === id) await del(store, row.id);
   }
   await del("patients", id);
@@ -57,9 +59,13 @@ export async function requestPersistence() {
   catch { return false; }
 }
 
+const encBlob = (b) => b.data ? { id: b.id, patientId: b.patientId, data: b64(b.data) } : { id: b.id, patientId: b.patientId, iv: b64(b.iv), ct: b64(b.ct) };
+const decBlob = (b) => b.data ? { id: b.id, patientId: b.patientId, data: unb64(b.data).buffer } : { id: b.id, patientId: b.patientId, iv: unb64(b.iv), ct: unb64(b.ct).buffer };
+
 export async function exportAll() {
-  return { app: "seguimiento-medico", version: 1, exportedAt: new Date().toISOString(),
-    patients: await all("patients"), reports: await all("reports"), weights: await all("weights") };
+  return { app: "seguimiento-medico", version: 2, exportedAt: new Date().toISOString(),
+    patients: await all("patients"), reports: await all("reports"), weights: await all("weights"),
+    files: await all("files"), blobs: (await all("blobs")).map(encBlob) };
 }
 
 /** Une una copia de respaldo con los datos actuales, sin duplicar. Los datos cifrados se conservan cifrados. */
@@ -96,5 +102,18 @@ export async function importBackup(data) {
     await put("weights", { ...rest, patientId: pid });
     addedWeights++;
   }
-  return { addedReports, addedWeights, renamed };
+  const files = await all("files");
+  let addedFiles = 0;
+  for (const f of data.files || []) {
+    const pid = idMap.get(f.patientId);
+    const dup = f.enc ? files.some((x) => x.enc?.iv === f.enc.iv) : files.some((x) => x.patientId === pid && x.hash === f.hash);
+    if (dup) continue;
+    const { id, ...rest } = f;
+    const newId = await put("files", { ...rest, patientId: pid });
+    files.push({ ...rest, id: newId, patientId: pid });
+    const blob = (data.blobs || []).find((b) => b.id === id);
+    if (blob) await put("blobs", decBlob({ ...blob, id: newId, patientId: pid }));
+    addedFiles++;
+  }
+  return { addedReports, addedWeights, addedFiles, renamed };
 }

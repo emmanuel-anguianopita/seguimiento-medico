@@ -64,3 +64,31 @@ En Análisis e Histórico hay un selector «Agrupar por: Estudio / Sistema u ór
 - **Primera pantalla:** al abrir la aplicación sin datos aparece un cuestionario con nombre, fecha de nacimiento (calcula la edad), género, peso, altura, raza u origen (opcional) y, si se desea, el calendario menstrual. También se puede abrir después en ⋯ → Perfil del paciente.
 - **Calendario menstrual (opcional):** pregunta la fecha de la última regla, la duración del ciclo y de la regla, y si los ciclos son regulares. La pestaña «Ciclo» muestra la fase, el día del ciclo, la próxima regla, la ovulación y la ventana fértil estimadas, un calendario por mes y permite registrar cada inicio de regla (el promedio del ciclo se ajusta con el historial). Es una estimación y no sirve como método anticonceptivo.
 - La raza solo se guarda como dato de contexto y no cambia ningún cálculo. El perfil completo, incluido el ciclo, se cifra si el paciente tiene contraseña.
+
+# Versión con acceso de pacientes y PDF guardados
+
+## Cómo funciona
+- **Profesional** (tú): abres la dirección de la aplicación terminada en `#admin` (por ejemplo `https://TU-USUARIO.github.io/TU-REPOSITORIO/#admin`). Ahí importas los PDF, que se leen y se **guardan por paciente** en tu dispositivo. Cada vez que importas un estudio, la aplicación abre la pestaña **Avances** y muestra qué mejoró, qué empeoró y qué es nuevo.
+- **Paciente**: abre la dirección normal (sin `#admin`), escribe su nombre completo y su contraseña, y ve Análisis, Avances, Histórico, Peso, Ciclo e Informes (con sus PDF). Es de solo lectura y la sesión se cierra sola a los 5 minutos.
+- Los resultados y los PDF llegan al paciente a través de GitHub, siempre **cifrados** con la contraseña de ese paciente. Sin el nombre y la contraseña no se puede leer nada.
+
+## Publicar los resultados de un paciente
+1. En la aplicación (modo profesional): menú ⋯ → **Publicar resultados para el paciente**.
+2. Escribe una contraseña de al menos 10 caracteres (la misma cada vez para ese paciente) y entrégasela por otro medio.
+3. Se genera un archivo `resultados-XXXX.zip`. Ábrelo: trae un archivo `.json` y una carpeta con el mismo código.
+4. Copia ambos dentro de la carpeta `data` del repositorio (créala la primera vez) y reemplaza si ya existen.
+5. En GitHub Desktop: escribe un resumen, **Commit to main** y **Push origin**.
+6. Repite con cada estudio nuevo.
+
+## Actualizar los archivos de la aplicación en GitHub
+1. Descomprime `seguimiento-medico-pwa.zip`; queda una carpeta `seguimiento-medico`.
+2. En GitHub Desktop: **Repository → Show in Finder** (Mac) o **Show in Explorer** (Windows) para abrir la carpeta del repositorio.
+3. Copia **todo lo que hay dentro** de `seguimiento-medico` a la carpeta del repositorio y elige **Reemplazar** cuando lo pregunte. No toques la carpeta `data`: el zip no la incluye.
+4. Vuelve a GitHub Desktop: verás los archivos cambiados. Resumen, **Commit to main**, **Push origin**.
+5. Espera uno o dos minutos y abre la aplicación dos veces para que se actualice sola.
+
+## Recomendaciones de seguridad
+- El repositorio es público: los archivos publicados están cifrados, pero cualquiera puede descargarlos. Usa contraseñas largas y distintas por paciente.
+- Si un paciente olvida su contraseña, se publica de nuevo con otra.
+- Los datos de salud están sujetos a la ley de protección de datos personales; informa a tus pacientes con un aviso de privacidad y su consentimiento.
+- Haz una copia de respaldo con regularidad (menú ⋯ → Exportar copia de respaldo; ahora incluye los PDF).

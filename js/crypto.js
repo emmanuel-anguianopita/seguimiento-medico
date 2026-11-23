@@ -5,13 +5,13 @@ const dec = new TextDecoder();
 export const ITERATIONS = 600000;
 const MARK = "seguimiento-medico";
 
-const b64 = (buf) => {
+export const b64 = (buf) => {
   const u = new Uint8Array(buf);
   let s = "";
   for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000));
   return btoa(s);
 };
-const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+export const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 async function deriveKey(password, saltB64, iterations) {
   const base = await crypto.subtle.importKey("raw", enc.encode(password.normalize("NFKC")), "PBKDF2", false, ["deriveKey"]);
@@ -47,4 +47,14 @@ export async function tryUnlock(password, meta) {
   } catch {
     return null;
   }
+}
+
+/** Cifra datos binarios (por ejemplo un PDF). Devuelve {iv, ct} en binario. */
+export async function encryptBytes(key, bytes) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes);
+  return { iv, ct };
+}
+export async function decryptBytes(key, rec) {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: rec.iv }, key, rec.ct));
 }

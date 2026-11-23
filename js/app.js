@@ -2,10 +2,13 @@ import { parseDocument, SUPPORTED_LABS } from "./parser.js";
 import { compose, bmi as calcBmi } from "./composition.js";
 import { SYSTEM_NAMES, systemOf, systemIcon } from "./systems.js";
 import { PHASES, phaseOn, monthGrid, addDays, cycleLength } from "./cycle.js";
+import { progress, compare } from "./progress.js";
+import { lookupId, buildBundle, openBundleWithKey, openPdfFile, MIN_PASSWORD } from "./publish.js";
 import { pdfToPages } from "./pdftext.js";
 import * as db from "./db.js";
 import { lineChart, sparkline, fmt } from "./charts.js";
-import { makeProtection, tryUnlock, encryptJSON, decryptJSON } from "./crypto.js";
+import { makeProtection, tryUnlock, encryptJSON, decryptJSON, encryptBytes, decryptBytes } from "./crypto.js";
+import { makeZip } from "./zip.js";
 
 const CATEGORIES = ["Hematología", "Química clínica", "Inmunología", "Orina", "Otros"];
 const STATUS = {
@@ -23,12 +26,14 @@ const makeKey = (name) => name.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(
 const toTitle = (s) => s.toLowerCase().replace(/(^|\s)\S/g, (c) => c.toUpperCase());
 
 const state = {
-  patients: [], reports: [], weights: [],
+  patients: [], reports: [], weights: [], files: [], portalKey: null, portalId: null,
   patientId: Number(localStorage.getItem("patientId")) || null,
   tab: "analisis", view: null, onlyOut: false, search: "", busy: false,
-  keys: new Map(), unlockError: "", histSearch: "", histOnlyOut: false, calMonth: null, groupBy: localStorage.getItem("groupBy") === "system" ? "system" : "study",
+  keys: new Map(), unlockError: "", histSearch: "", histOnlyOut: false, calMonth: null,
+  readOnly: false, mode: "admin", justAdded: null, portalError: "", groupBy: localStorage.getItem("groupBy") === "system" ? "system" : "study",
 };
 const REPORT_FIELDS = ["date", "lab", "folio", "fileHash", "rawText", "results", "importedAt"];
+const FILE_FIELDS = ["hash", "name", "size"];
 const WEIGHT_FIELDS = ["date", "kg", "note", "fatPct", "waterPct", "boneKg"];
 const pick = (o, fields) => Object.fromEntries(fields.map((f) => [f, o[f]]));
 const isLocked = (p) => !!p && !!p.protection && !state.keys.has(p.id);
@@ -51,6 +56,7 @@ async function load() {
   };
   state.reports = await decode(await db.all("reports"));
   state.weights = await decode(await db.all("weights"));
+  state.files = await decode(await db.all("files"));
   if (!state.patients.some((p) => p.id === state.patientId)) state.patientId = state.patients[0]?.id ?? null;
   if (state.patientId) localStorage.setItem("patientId", state.patientId);
 }
@@ -82,6 +88,20 @@ async function fillProfile(pat, parsed) {
   if (!prof.sex && parsed.sex) { prof.sex = parsed.sex; changed = true; }
   if (changed) { pat.profile = prof; await savePatient(pat); }
 }
+/** Guarda el PDF original del estudio (cifrado si el paciente tiene contraseña). */
+async function saveFile(pat, rec, bytes) {
+  const id = await db.put("files", await encodeRecord(pat, rec, FILE_FIELDS));
+  const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const blob = pat.protection ? { id, patientId: pat.id, ...(await encryptBytes(state.keys.get(pat.id), new Uint8Array(copy))) } : { id, patientId: pat.id, data: copy };
+  await db.put("blobs", blob);
+  state.files.push({ ...rec, id });
+}
+async function getPdfBytes(f) {
+  const blob = await db.get("blobs", f.id);
+  if (!blob) throw new Error("PDF no guardado");
+  return blob.data ? new Uint8Array(blob.data) : decryptBytes(state.keys.get(f.patientId), blob);
+}
+const fileOf = (r, patientId = state.patientId) => state.files.find((x) => x.hash === r.fileHash && x.patientId === patientId);
 async function saveReport(pat, report) { report.id = await db.put("reports", await encodeRecord(pat, report, REPORT_FIELDS)); }
 async function saveWeight(pat, w) { w.id = await db.put("weights", await encodeRecord(pat, w, WEIGHT_FIELDS)); }
 
@@ -136,7 +156,16 @@ async function importFiles(files) {
       try {
         const buf = await f.arrayBuffer();
         const hash = await sha256(buf);
-        if (state.reports.some((r) => r.fileHash === hash)) { outcomes.push({ name: f.name, ok: false, msg: "Este PDF ya estaba importado." }); continue; }
+        const copy = buf.slice(0);   // pdf.js puede consumir el búfer original
+        const dupReport = state.reports.find((r) => r.fileHash === hash);
+        if (dupReport) {
+          const owner = state.patients.find((p) => p.id === dupReport.patientId);
+          if (owner && !state.files.some((x) => x.hash === hash && x.patientId === owner.id)) {
+            await saveFile(owner, { patientId: owner.id, hash, name: f.name, size: copy.byteLength }, new Uint8Array(copy));
+            outcomes.push({ name: f.name, ok: true, attached: true, date: dupReport.date, msg: "Este estudio ya estaba importado; ahora se guardó también su PDF." });
+          } else outcomes.push({ name: f.name, ok: false, msg: "Este PDF ya estaba importado." });
+          continue;
+        }
         const pages = await pdfToPages(pdfjs, new Uint8Array(buf));
         const parsed = parseDocument(pages);
         const rawText = pages.map((p, i) => `— Página ${i + 1} —\n${p.join("\n")}`).join("\n");
@@ -163,9 +192,10 @@ async function importFiles(files) {
           fileHash: hash, rawText, results: parsed.results, importedAt: new Date().toISOString() };
         await saveReport(pat, report);
         state.reports.push(report);
+        await saveFile(pat, { patientId: pat.id, hash, name: f.name, size: copy.byteLength }, new Uint8Array(copy));
         state.patientId = pat.id; localStorage.setItem("patientId", pat.id);
         const out = parsed.results.filter((r) => r.status !== "normal").length;
-        outcomes.push({ name: f.name, ok: true, msg: `${parsed.lab} · ${fmtDate(report.date)}: ${parsed.results.length} resultados, ${out} fuera de rango.` + (parsed.date ? "" : " No se encontró la fecha; se usó la de hoy (corrígela en Informes).") });
+        outcomes.push({ name: f.name, ok: true, date: report.date, msg: `${parsed.lab} · ${fmtDate(report.date)}: ${parsed.results.length} resultados, ${out} fuera de rango.` + (parsed.date ? "" : " No se encontró la fecha; se usó la de hoy (corrígela en Informes).") });
       } catch (e) {
         console.error(e);
         outcomes.push({ name: f.name, ok: false, msg: "No se pudo leer el archivo." });
@@ -175,7 +205,10 @@ async function importFiles(files) {
     console.error(e);
     outcomes.push({ name: "PDF", ok: false, msg: "No se pudo cargar el lector de PDF." });
   }
-  state.busy = false; await load(); render();
+  state.busy = false; await load();
+  const added = outcomes.filter((o) => o.ok && !o.attached);
+  if (added.length) { state.tab = "avances"; state.view = null; state.justAdded = added.map((o) => o.date).sort().pop(); }
+  render();
   const unknown = outcomes.filter((o) => o.raw);
   const actions = [{ label: "Listo" }];
   if (unknown.length) actions.unshift({ label: "Copiar texto del PDF", onClick: () => copyUnknown(unknown) });
@@ -193,6 +226,7 @@ async function copyUnknown(list) {
 // ---------- Vistas ----------
 function header(title, back) {
   if (back) return `<header class="top back"><button class="icon" data-action="back" aria-label="Volver">‹</button><h1>${esc(title)}</h1><span class="spacer"></span></header>`;
+  if (state.readOnly) return `<header class="top"><h1 class="grow">${esc(patient()?.name || title)}</h1><button class="icon" data-action="menu" aria-label="Menú">⋯</button></header>`;
   const opts = state.patients.map((p) => `<option value="${p.id}" ${p.id === state.patientId ? "selected" : ""}>${p.protection ? "🔒 " : ""}${esc(p.name)}</option>`).join("");
   return `<header class="top"><select id="patientSelect" aria-label="Paciente">${opts || `<option>${esc(title)}</option>`}</select><button class="icon" data-action="menu" aria-label="Menú">⋯</button></header>`;
 }
@@ -202,6 +236,168 @@ function viewLocked(p) {
     <p class="muted">Este paciente está protegido con contraseña.</p>
     <form id="unlockForm" class="form lockform"><input type="password" name="pw" placeholder="Contraseña" autocomplete="current-password" required>
     <button class="primary" type="submit">Desbloquear</button><div class="err">${esc(state.unlockError)}</div></form></div></main>`;
+}
+
+function viewPortal() {
+  return `<header class="top"><h1 class="grow">Consulta de resultados</h1></header><main><div class="empty portal"><div class="logo">🩺</div>
+    <p><strong>Consulta tu histórico de resultados</strong></p>
+    <p class="muted">Escribe tu nombre completo, como aparece en tus estudios, y la contraseña que te dio tu médico.</p>
+    <form id="portalForm" class="form lockform"><input name="name" placeholder="Nombre completo" autocomplete="name" required>
+    <input type="password" name="pw" placeholder="Contraseña" autocomplete="current-password" required>
+    <button class="primary" type="submit">Ver mis resultados</button><div class="err" id="portalErr">${esc(state.portalError)}</div></form>
+    <button class="link" data-action="goAdmin">Acceso del profesional</button></div></main>`;
+}
+
+async function portalLogin(name, pw) {
+  state.busy = true; state.portalError = ""; render();
+  const fail = "No encontramos resultados con ese nombre y contraseña. Revisa que el nombre esté completo y escrito como en tus estudios.";
+  try {
+    const id = await lookupId(name);
+    const res = await fetch(`./data/${id}.json`, { cache: "no-store" });
+    if (!res.ok) throw new Error("no encontrado");
+    const opened = await openBundleWithKey(await res.json(), pw);
+    if (!opened) throw new Error("contraseña");
+    const data = opened.payload;
+    state.portalKey = opened.key; state.portalId = id;
+    state.patients = [{ id: 1, name: data.name, nameKey: makeKey(data.name), profile: data.profile || {} }];
+    state.patientId = 1;
+    state.reports = data.reports.map((r) => ({ ...r, patientId: 1 }));
+    state.weights = data.weights.map((w) => ({ ...w, patientId: 1 }));
+    state.readOnly = true; state.tab = "analisis"; state.view = null; state.justAdded = null;
+  } catch (e) {
+    state.portalError = e instanceof TypeError ? "No hay conexión. Inténtalo de nuevo." : fail;
+  }
+  state.busy = false; render(); touch();
+}
+
+async function leavePortal() {
+  state.readOnly = false; state.patients = []; state.reports = []; state.weights = []; state.files = []; state.patientId = null; state.view = null; state.tab = "analisis";
+  state.portalKey = null; state.portalId = null;
+  document.getElementById("dlg")?.remove();
+  if (state.mode === "admin") await load();
+  render();
+}
+
+async function setMode(mode) {
+  state.mode = mode;
+  if (mode === "admin") { try { localStorage.setItem("mode", "admin"); } catch {} }
+  if (state.readOnly) { state.readOnly = false; state.patients = []; state.reports = []; state.weights = []; state.portalKey = null; state.portalId = null; }
+  if (mode === "admin") await load();
+  state.view = null; state.tab = "analisis"; state.portalError = "";
+  render();
+}
+async function decideMode() {
+  const h = location.hash;
+  if (h === "#portal") return "portal";
+  if (h === "#admin") return "admin";
+  if (localStorage.getItem("mode") === "admin") return "admin";
+  return (await db.all("patients")).length ? "admin" : "portal";
+}
+
+// ---- publicar para el paciente ----
+async function openPdf(hash, download) {
+  let bytes;
+  try {
+    if (state.readOnly) {
+      const res = await fetch(`./data/${state.portalId}/${hash.slice(0, 16)}.bin`, { cache: "no-store" });
+      if (!res.ok) throw new Error("no encontrado");
+      bytes = await openPdfFile(state.portalKey, new Uint8Array(await res.arrayBuffer()));
+    } else {
+      const f = state.files.find((x) => x.hash.startsWith(hash.slice(0, 16)) && x.patientId === state.patientId);
+      bytes = await getPdfBytes(f);
+    }
+  } catch (e) {
+    console.error(e);
+    return showDialog("No se pudo abrir el PDF", state.readOnly ? "Revisa tu conexión e inténtalo de nuevo. Si el problema sigue, avisa a tu médico." : "El PDF de este estudio no está guardado. Impórtalo de nuevo para guardarlo.");
+  }
+  const r = myReports().find((x) => (x.fileHash || x.pdf || "").startsWith(hash.slice(0, 16)));
+  const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+  const save = () => { const a = document.createElement("a"); a.href = url; a.download = `estudio-${r?.date || "resultados"}.pdf`; document.body.appendChild(a); a.click(); a.remove(); };
+  if (download || !window.open(url, "_blank")) save();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+function deliverFile(file) {
+  return async () => {
+    try { if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: file.name }); return; } }
+    catch (e) { if (e.name === "AbortError") return; }
+    const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  };
+}
+function publishPatient(pat) {
+  let file = null, info = null;
+  const d = showForm({
+    title: "Publicar para el paciente",
+    intro: `Se crea un paquete cifrado con los resultados y los PDF de <strong>${esc(pat.name)}</strong>. El paciente lo abre con su nombre completo y esta contraseña. Compártesela por un medio distinto al paquete y usa al menos ${MIN_PASSWORD} caracteres.`,
+    fields: [{ name: "pw", label: `Contraseña del paciente (mínimo ${MIN_PASSWORD} caracteres)`, autocomplete: "new-password" }, { name: "pw2", label: "Repite la contraseña", autocomplete: "new-password" }],
+    okLabel: "Crear archivo",
+    onSubmit: async ({ pw, pw2 }) => {
+      if (pw.length < MIN_PASSWORD) return `La contraseña debe tener al menos ${MIN_PASSWORD} caracteres.`;
+      if (pw !== pw2) return "Las contraseñas no coinciden.";
+      const reports = state.reports.filter((r) => r.patientId === pat.id), weights = state.weights.filter((w) => w.patientId === pat.id);
+      const pdfs = [];
+      for (const f of state.files.filter((x) => x.patientId === pat.id)) pdfs.push({ hash: f.hash, bytes: await getPdfBytes(f) });
+      const out = await buildBundle(pat, reports, weights, pw, pdfs);
+      const zip = makeZip([{ name: `${out.id}.json`, data: new TextEncoder().encode(out.json) }, ...out.files]);
+      file = new File([zip], `resultados-${out.id.slice(0, 8)}.zip`, { type: "application/zip" });
+      info = { pdfs: pdfs.length, missing: reports.filter((r) => !out.payload.reports.find((x) => x.id === r.id)?.pdf).length };
+    },
+  });
+  d.addEventListener("closed", (e) => {
+    if (e.detail !== true || !file) return;
+    showDialog("Paquete listo", `<p><strong>${esc(file.name)}</strong> · ${info.pdfs} PDF cifrado${info.pdfs === 1 ? "" : "s"}</p>
+      ${info.missing ? `<p class="small muted">${info.missing} estudio${info.missing === 1 ? "" : "s"} no tiene${info.missing === 1 ? "" : "n"} PDF guardado: vuelve a importar ese PDF y publica de nuevo para incluirlo.</p>` : ""}
+      <ol class="small"><li>Guarda el .zip y ábrelo. Contiene un archivo .json y una carpeta con el mismo código. Copia ambos dentro de la carpeta <strong>data</strong> del repositorio (créala la primera vez) y reemplaza si ya existen.</li>
+      <li>En GitHub Desktop escribe un resumen, pulsa <strong>Commit to main</strong> y luego <strong>Push origin</strong>.</li>
+      <li>En un par de minutos el paciente podrá consultar sus resultados con su nombre y contraseña.</li></ol>
+      <p class="small muted">Repite este proceso cada vez que importes estudios nuevos, usando la misma contraseña.</p>`,
+      [{ label: "Cerrar" }, { label: "Guardar archivo", onClick: deliverFile(file) }]);
+  });
+}
+
+const CHANGE = { mejoro: ["good", "Mejoró"], empeoro: ["bad", "Empeoró"], estable: ["flat", "Estable"], igual: ["flat", "Sin cambio"], nuevo: ["new", "Nuevo"] };
+const signed = (v) => `${v > 0 ? "+" : ""}${fmt(Number(v.toFixed(2)))}`;
+function trendChip(it) {
+  if (!it) return "";
+  const [cls, label] = CHANGE[it.change];
+  if (it.change === "nuevo") return `<span class="chip new">Nuevo</span>`;
+  const arrow = it.delta > 0 ? "▲" : it.delta < 0 ? "▼" : "●";
+  return `<span class="chip ${cls}" title="${label}">${it.delta === null ? "●" : arrow} ${it.delta === null ? label : signed(it.delta)}</span>`;
+}
+const pctChip = (d) => d === null ? "" : `<span class="chip ${d > 0 ? "good" : d < 0 ? "bad" : "flat"}">${d > 0 ? "▲" : d < 0 ? "▼" : "●"} ${signed(d)} puntos</span>`;
+
+function changeRow(it) {
+  const prev = it.prev ? `${esc(display(it.prev))} → ` : "";
+  return `<li><button class="row" data-action="analyte" data-key="${esc(it.key)}"><span class="grow"><span class="name">${esc(it.name)}${it.category === "Orina" ? " (orina)" : ""}</span>
+    <span class="sub">${prev}${esc(display(it.last))} ${esc(it.last.unit)} · ${esc(fmtDate(it.last.date))}</span></span>
+    <span class="val">${badge(it.last.status)}${trendChip(it)}</span></button></li>`;
+}
+
+function viewAvances() {
+  const reports = myReports();
+  if (!reports.length) return `${header("Avances")}<main><h2 class="hello">${esc(greeting())}</h2><div class="empty"><p>Todavía no hay estudios.</p><p class="muted">Cuando haya resultados verás aquí cómo avanzan.</p>${state.readOnly ? "" : `<button class="primary" data-action="import">Importar PDF</button>`}</div></main>`;
+  const P = progress(buildSeries(), reports);
+  const t = P.timeline[P.timeline.length - 1];
+  let html = `${header("Avances")}<main>`;
+  if (state.justAdded) html += `<div class="card banner">✓ Se agregó el estudio del <strong>${esc(fmtDate(state.justAdded))}</strong>. Estos son los cambios.</div>`;
+  html += `<div class="card hero"><div class="muted small">Indicadores dentro de rango · estudio del ${esc(fmtDate(P.latestDate))}</div>
+    <div class="bigrow"><span class="big">${fmt(P.nowPct)} %</span>${pctChip(P.deltaPct)}</div>
+    <div class="bar"><i style="width:${P.nowPct}%"></i></div>
+    <div class="small muted">${t.ok} de ${t.total} indicadores en rango${P.previousDate ? ` · comparado con el estudio del ${esc(fmtDate(P.previousDate))}` : " · es el primer estudio, aún no hay con qué comparar"}</div>
+    ${P.timeline.length > 1 ? lineChart({ points: P.timeline.map((x) => ({ t: toTime(x.date), v: x.pct, status: "normal" })), label: "Porcentaje de indicadores en rango por estudio" }) : ""}</div>`;
+  const flat = P.counts.estable + P.counts.igual;
+  html += `<div class="tiles"><div class="tile good"><strong>${P.counts.mejoro}</strong><span>Mejoraron</span></div><div class="tile bad"><strong>${P.counts.empeoro}</strong><span>Empeoraron</span></div>
+    <div class="tile flat"><strong>${flat}</strong><span>Sin cambio</span></div><div class="tile new"><strong>${P.counts.nuevo}</strong><span>Nuevos</span></div></div>`;
+  html += `<h2>Por sistema u órgano</h2><div class="card">` + P.bySystem.map((x) => {
+    const pct = Math.round((x.ok / x.total) * 100);
+    return `<div class="sysrow"><div class="sysname"><span>${esc(systemIcon(x.name))} ${esc(x.name)}</span><span class="muted small">${x.ok}/${x.total}${x.mejoro ? ` · <b class="g">▲${x.mejoro}</b>` : ""}${x.empeoro ? ` · <b class="r">▼${x.empeoro}</b>` : ""}</span></div><div class="bar thin"><i style="width:${pct}%"></i></div></div>`;
+  }).join("") + `</div>`;
+  const section = (title, list) => list.length ? `<h2>${title} (${list.length})</h2><ul class="list">${list.map(changeRow).join("")}</ul>` : "";
+  const by = (c) => P.items.filter((i) => i.change === c).sort((a, b) => a.name.localeCompare(b.name, "es"));
+  html += section("Empeoraron", by("empeoro")) + section("Mejoraron", by("mejoro"));
+  html += section("Siguen fuera de rango sin cambio", by("igual").filter((i) => i.last.status !== "normal")) + section("Nuevos en este estudio", by("nuevo"));
+  return html + `<p class="muted small">Se compara el último valor de cada indicador con el anterior. «Mejoró» incluye valores que volvieron al rango o se acercaron a él.</p></main>`;
 }
 
 const GENDERS = [["", "Selecciona"], ["F", "Mujer"], ["M", "Hombre"], ["X", "No binario"], ["N", "Prefiero no decir"]];
@@ -307,7 +503,7 @@ async function submitProfile(form) {
 
 const profileNudge = () => {
   const p = patient();
-  return p && !p.profile?.answered ? `<div class="card"><div class="small">Responde el cuestionario inicial para calcular el IMC, la composición corporal y, si lo deseas, el calendario menstrual.</div><button class="link" data-action="profile">Abrir cuestionario</button></div>` : "";
+  return p && !state.readOnly && !p.profile?.answered ? `<div class="card"><div class="small">Responde el cuestionario inicial para calcular el IMC, la composición corporal y, si lo deseas, el calendario menstrual.</div><button class="link" data-action="profile">Abrir cuestionario</button></div>` : "";
 };
 
 const dateLong = (iso) => new Date(iso + "T12:00:00").toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" });
@@ -316,11 +512,11 @@ function viewCiclo() {
   const pat = patient();
   const cy = pat?.profile?.cycle;
   let html = `${header("Ciclo")}<main>`;
-  if (!cy || !["natural", "hormonal"].includes(cy.mode)) return html + `<div class="empty"><p>El calendario menstrual no está activado.</p><button class="primary" data-action="profile">Activar en el perfil</button></div></main>`;
-  if (cy.mode === "hormonal") return html + `<div class="card"><strong>Anticonceptivo hormonal</strong><p class="small">Con anticonceptivos hormonales no hay un ciclo natural con ovulación, por eso no se calculan fases. Puedes cambiar esta opción en el perfil.</p><button class="link" data-action="profile">Editar perfil</button></div></main>`;
+  if (!cy || !["natural", "hormonal"].includes(cy.mode)) return html + `<div class="empty"><p>El calendario menstrual no está activado.</p>${state.readOnly ? "" : `<button class="primary" data-action="profile">Activar en el perfil</button>`}</div></main>`;
+  if (cy.mode === "hormonal") return html + `<div class="card"><strong>Anticonceptivo hormonal</strong><p class="small">Con anticonceptivos hormonales no hay un ciclo natural con ovulación, por eso no se calculan fases.</p>${state.readOnly ? "" : `<button class="link" data-action="profile">Editar perfil</button>`}</div></main>`;
   const today = todayIso();
   const now = phaseOn(cy, today);
-  if (!now) return html + `<div class="empty"><p>Falta la fecha de tu última regla.</p><button class="primary" data-action="periodStart">Registrar inicio de regla</button></div></main>`;
+  if (!now) return html + `<div class="empty"><p>Falta la fecha de la última regla.</p>${state.readOnly ? "" : `<button class="primary" data-action="periodStart">Registrar inicio de regla</button>`}</div></main>`;
   const ph = PHASES[now.phase];
   html += `<div class="card cyc"><div class="muted small">Hoy · ${esc(dateLong(today))}</div>
     <div class="phase" style="--c:${ph.color}">Fase ${esc(ph.name.toLowerCase())}</div>
@@ -331,7 +527,7 @@ function viewCiclo() {
     <li>Ventana fértil estimada: <strong>${esc(fmtDate(now.fertile.from))} al ${esc(fmtDate(now.fertile.to))}</strong>${now.inFertileWindow ? " · estás dentro de ella" : ""}</li></ul>
     ${now.projected ? `<p class="small muted">Estimación proyectada: no hay un registro de regla reciente. Registra el inicio de tu última regla para afinar el cálculo.</p>` : ""}
     ${now.irregular ? `<p class="small muted">Como tus ciclos no son regulares, las fechas pueden variar varios días.</p>` : ""}
-    <button class="primary wide" data-action="periodStart">Registrar inicio de regla</button></div>`;
+    ${state.readOnly ? "" : `<button class="primary wide" data-action="periodStart">Registrar inicio de regla</button>`}</div>`;
   const cm = state.calMonth || { y: new Date().getFullYear(), m: new Date().getMonth() };
   const title = new Date(cm.y, cm.m, 1).toLocaleDateString("es-MX", { month: "long" }) + " de " + cm.y;
   const starts = new Set(cy.starts || []);
@@ -344,7 +540,7 @@ function viewCiclo() {
     }).join("") + `</div>
     <div class="legend">${Object.values(PHASES).map((p) => `<span><i style="background:${p.color}"></i>${esc(p.name)}</span>`).join("")}<span><i class="ring"></i>Ventana fértil</span><span><i class="dot"></i>Inicio de regla</span></div></div>`;
   const hist = [...(cy.starts || [])].sort().reverse().slice(0, 8);
-  html += `<h2>Inicios de regla registrados</h2><ul class="list">${hist.map((d) => `<li class="row static"><span class="grow"><span class="name">${esc(fmtDate(d))}</span></span><button class="icon danger" data-action="delStart" data-date="${d}" aria-label="Borrar">✕</button></li>`).join("")}</ul>
+  html += `<h2>Inicios de regla registrados</h2><ul class="list">${hist.map((d) => `<li class="row static"><span class="grow"><span class="name">${esc(fmtDate(d))}</span></span>${state.readOnly ? "" : `<button class="icon danger" data-action="delStart" data-date="${d}" aria-label="Borrar">✕</button>`}</li>`).join("")}</ul>
     <p class="small muted">Ciclo promedio usado: ${cycleLength(cy)} días. Las fases son estimaciones basadas en un ciclo típico; no sustituyen la valoración médica ni sirven como método anticonceptivo.</p></main>`;
   return html;
 }
@@ -386,8 +582,10 @@ const groupToggle = () => `<div class="seg" role="group" aria-label="Agrupar por
 
 function viewAnalisis() {
   const reports = myReports();
-  if (!reports.length) return `${header("Análisis")}<main><h2 class="hello">${esc(greeting())}</h2>${profileNudge()}<div class="empty"><p>Todavía no hay análisis.</p><p class="muted">Importa un PDF de laboratorio y los resultados se leen automáticamente.</p><button class="primary" data-action="import">Importar PDF</button></div></main>`;
+  if (!reports.length) return `${header("Análisis")}<main><h2 class="hello">${esc(greeting())}</h2>${profileNudge()}<div class="empty"><p>Todavía no hay análisis.</p><p class="muted">${state.readOnly ? "Tu médico aún no ha publicado resultados." : "Importa un PDF de laboratorio y los resultados se leen automáticamente."}</p>${state.readOnly ? "" : `<button class="primary" data-action="import">Importar PDF</button>`}</div></main>`;
   const all = buildSeries();
+  const prog = progress(all, reports);
+  const byKey = new Map(prog.items.map((i) => [i.key, i]));
   const flagged = all.filter((s) => s.points[s.points.length - 1].status !== "normal").length;
   const q = state.search.trim().toLowerCase();
   const list = all.filter((s) => (!q || s.name.toLowerCase().includes(q)) && (!state.onlyOut || s.points[s.points.length - 1].status !== "normal"));
@@ -402,7 +600,7 @@ function viewAnalisis() {
       return `<li><button class="row" data-action="analyte" data-key="${esc(s.key)}">
         <span class="grow"><span class="name">${esc(s.name)}</span><span class="sub">${fmtDate(last.date)} · ${s.points.length} estudio${s.points.length === 1 ? "" : "s"}</span></span>
         ${sparkline(nums, last.status)}
-        <span class="val"><strong>${esc(display(last))} ${esc(last.unit)}</strong>${badge(last.status)}</span></button></li>`;
+        <span class="val"><strong>${esc(display(last))} ${esc(last.unit)}</strong>${badge(last.status)}${trendChip(byKey.get(s.key))}</span></button></li>`;
     }).join("") + "</ul>";
   }
   if (!list.length) html += `<p class="muted center">Sin resultados para ese filtro.</p>`;
@@ -426,7 +624,7 @@ function viewAnalyte(key) {
 
 function viewHistorico() {
   const reports = myReports();
-  if (!reports.length) return `${header("Histórico")}<main><h2 class="hello">${esc(greeting())}</h2><div class="empty"><p>Todavía no hay análisis.</p><p class="muted">Cuando importes informes aparecerá aquí cada indicador a lo largo del tiempo.</p><button class="primary" data-action="import">Importar PDF</button></div></main>`;
+  if (!reports.length) return `${header("Histórico")}<main><h2 class="hello">${esc(greeting())}</h2><div class="empty"><p>Todavía no hay análisis.</p><p class="muted">Cuando haya informes aparecerá aquí cada indicador a lo largo del tiempo.</p>${state.readOnly ? "" : `<button class="primary" data-action="import">Importar PDF</button>`}</div></main>`;
   const all = buildSeries();
   const q = state.histSearch.trim().toLowerCase();
   const cols = [...reports].sort((a, b) => a.date.localeCompare(b.date));
@@ -435,12 +633,12 @@ function viewHistorico() {
     <div class="tools"><input id="histSearch" type="search" placeholder="Buscar indicador" value="${esc(state.histSearch)}"><label class="check"><input type="checkbox" id="histOnlyOut" ${state.histOnlyOut ? "checked" : ""}> Con algún valor fuera de rango</label></div>${groupToggle()}
     <p class="muted small">${all.length} indicadores en ${cols.length} informe${cols.length === 1 ? "" : "s"}. Toca un indicador para ver su gráfica.</p>`;
   for (const [cat, rows] of groupRows(list)) {
-    html += `<h2>${cat}</h2><div class="histwrap"><table class="hist"><thead><tr><th class="sticky">Indicador</th>${cols.map((r) => `<th>${fmtDate(r.date)}</th>`).join("")}</tr></thead><tbody>` +
+    html += `<h2>${cat}</h2><div class="histwrap"><table class="hist"><thead><tr><th class="sticky">Indicador</th>${cols.map((r, i) => `<th class="${i === cols.length - 1 ? "latest" : ""}">${fmtDate(r.date)}${i === cols.length - 1 ? "<small>último</small>" : ""}</th>`).join("")}</tr></thead><tbody>` +
       rows.map((s) => {
-        const byRid = new Map(s.points.map((pt) => [pt.rid, pt]));
+        const byRid = new Map(s.points.map((pt, i) => [pt.rid, { ...pt, change: i ? compare({ ...s, points: s.points.slice(0, i + 1) }) : null }]));
         const unit = s.points[s.points.length - 1].unit;
         return `<tr><th class="sticky"><button data-action="analyte" data-key="${esc(s.key)}">${esc(s.name)}<small>${esc(unit)}</small></button></th>` +
-          cols.map((r) => { const pt = byRid.get(r.id); return pt ? `<td class="st-${pt.status}" title="Referencia: ${esc(reference(pt))}">${esc(display(pt))}</td>` : `<td class="none">–</td>`; }).join("") + "</tr>";
+          cols.map((r) => { const pt = byRid.get(r.id); const ch = pt?.change; const ar = ch && ch.delta ? `<sup class="ar ${CHANGE[ch.change][0]}">${ch.delta > 0 ? "▲" : "▼"}</sup>` : ""; return pt ? `<td class="st-${pt.status}${r.date === cols[cols.length - 1].date ? " latest" : ""}" title="Referencia: ${esc(reference(pt))}">${esc(display(pt))}${ar}</td>` : `<td class="none">–</td>`; }).join("") + "</tr>";
       }).join("") + "</tbody></table></div>";
   }
   if (!list.length) html += `<p class="muted center">Sin resultados para ese filtro.</p>`;
@@ -481,7 +679,7 @@ function compositionCard(w, prof) {
     <ul class="list">${line("IMC", c.bmi, "")}${line("Grasa corporal", c.fat, " %")}${line("Agua corporal", c.water, " %")}${line("Masa ósea", c.bone, " kg")}</ul>`;
   if (c.fat) html += `<p class="small">Masa grasa: <strong>${fmt(c.fatMassKg)} kg</strong> · Masa magra: <strong>${fmt(c.leanMassKg)} kg</strong>${c.waterKg ? ` · Agua: <strong>${fmt(c.waterKg)} kg</strong>` : ""}</p>`;
   if (c.paragraphs.length) html += `<p class="small">${c.paragraphs.map(esc).join(" ")}</p>`;
-  if (c.missing.length) html += `<p class="small muted">Para una evaluación completa agrega ${esc(c.missing.join(", "))} en el perfil.</p><button class="link" data-action="profile">Completar perfil</button>`;
+  if (c.missing.length) html += `<p class="small muted">Para una evaluación completa falta ${esc(c.missing.join(", "))} en el perfil.</p>${state.readOnly ? "" : `<button class="link" data-action="profile">Completar perfil</button>`}`;
   html += `<p class="muted small">Referencias: IMC de la OMS para adultos; grasa de Gallagher y colaboradores (2000); agua y masa ósea de guías de básculas de bioimpedancia. Las mediciones por bioimpedancia son estimaciones y varían con la hidratación. Esta lectura es informativa y no sustituye la valoración de un profesional de la salud.</p></div>`;
   return html;
 }
@@ -494,8 +692,8 @@ function viewPeso() {
   if (!pat) return `${header("Peso")}<main><div class="empty"><p>Primero crea un paciente o importa un PDF.</p><button class="primary" data-action="newPatient">Nuevo paciente</button></div></main>`;
   const prof = pat.profile || {};
   let html = `${header("Peso")}<main>`;
-  if (!prof.heightCm || !prof.sex || !prof.birthDate) html += `<div class="card"><div class="small">Completa la altura, el sexo y la fecha de nacimiento para calcular el IMC y evaluar la composición corporal.</div><button class="link" data-action="profile">Completar perfil</button></div>`;
-  html += `<form id="weightForm" class="card form"><div class="grid2"><label>Fecha<input type="date" name="date" value="${todayIso()}" max="${todayIso()}" required></label>
+  if (!state.readOnly && (!prof.heightCm || !prof.sex || !prof.birthDate)) html += `<div class="card"><div class="small">Completa la altura, el sexo y la fecha de nacimiento para calcular el IMC y evaluar la composición corporal.</div><button class="link" data-action="profile">Completar perfil</button></div>`;
+  if (!state.readOnly) html += `<form id="weightForm" class="card form"><div class="grid2"><label>Fecha<input type="date" name="date" value="${todayIso()}" max="${todayIso()}" required></label>
     <label>Peso (kg)<input name="kg" inputmode="decimal" placeholder="70.5" required></label></div>
     <div class="grid3"><label>% grasa<input name="fatPct" inputmode="decimal" placeholder="opcional"></label>
     <label>% agua<input name="waterPct" inputmode="decimal" placeholder="opcional"></label>
@@ -517,7 +715,7 @@ function viewPeso() {
     html += chart("Evolución de la masa ósea (kg)", ws.filter((w) => w.boneKg != null).map((w) => ({ t: toTime(w.date), v: w.boneKg, status: "normal" })), "Evolución de la masa ósea");
     html += `<h2>Registros</h2><ul class="list">` + [...ws].reverse().map((w) => {
       const extra = [w.fatPct != null ? `grasa ${fmt(w.fatPct)} %` : "", w.waterPct != null ? `agua ${fmt(w.waterPct)} %` : "", w.boneKg != null ? `huesos ${fmt(w.boneKg)} kg` : "", w.note || ""].filter(Boolean).join(" · ");
-      return `<li class="row static"><span class="grow"><span class="name">${fmtDate(w.date)}</span>${extra ? `<span class="sub">${esc(extra)}</span>` : ""}</span><strong>${kg(w.kg)}</strong><button class="icon danger" data-action="delWeight" data-id="${w.id}" aria-label="Borrar">✕</button></li>`;
+      return `<li class="row static"><span class="grow"><span class="name">${fmtDate(w.date)}</span>${extra ? `<span class="sub">${esc(extra)}</span>` : ""}</span><strong>${kg(w.kg)}</strong>${state.readOnly ? "" : `<button class="icon danger" data-action="delWeight" data-id="${w.id}" aria-label="Borrar">✕</button>`}</li>`;
     }).join("") + "</ul>";
   } else html += `<p class="muted center">Sin registros de peso todavía.</p>`;
   return html + "</main>";
@@ -525,11 +723,14 @@ function viewPeso() {
 
 function viewInformes() {
   const reports = [...myReports()].reverse();
-  let html = `${header("Informes")}<main><button class="primary wide" data-action="import">Importar PDF</button>`;
+  let html = `${header("Informes")}<main>${state.readOnly ? "" : `<button class="primary wide" data-action="import">Importar PDF</button>`}`;
   if (!reports.length) return html + `<p class="muted center">Sin informes.</p></main>`;
   html += `<ul class="list">` + reports.map((r) => {
     const out = r.results.filter((x) => x.status !== "normal").length;
-    return `<li><button class="row" data-action="report" data-id="${r.id}"><span class="grow"><span class="name">${fmtDate(r.date)}</span><span class="sub">${esc(r.lab)}</span></span><span class="sub right">${r.results.length} resultados<br>${out} fuera de rango</span><span class="chev">›</span></button></li>`;
+    const hash = state.readOnly ? r.pdf : fileOf(r) ? r.fileHash : null;
+    const info = `<span class="grow"><span class="name">${fmtDate(r.date)}</span><span class="sub">${esc(r.lab)}${hash ? " · 📎 PDF" : ""}</span></span><span class="sub right">${r.results.length} resultados<br>${out} fuera de rango</span>`;
+    if (state.readOnly) return `<li class="row static">${info}${hash ? `<span class="pdfbtns"><button class="mini" data-action="openPdf" data-hash="${hash}">Abrir PDF</button><button class="mini" data-action="openPdf" data-mode="download" data-hash="${hash}">Descargar</button></span>` : ""}</li>`;
+    return `<li><button class="row" data-action="report" data-id="${r.id}">${info}<span class="chev">›</span></button></li>`;
   }).join("") + "</ul></main>";
   return html;
 }
@@ -544,15 +745,19 @@ function viewReport(id) {
     if (!rows.length) continue;
     html += `<h2>${cat}</h2><ul class="list">` + rows.map((x) => `<li class="row static"><span class="grow"><span class="name">${esc(x.name)}</span><span class="sub">Referencia: ${esc(reference(x))}</span></span><span class="val"><strong>${esc(display(x))} ${esc(x.unit)}</strong>${badge(x.status)}</span></li>`).join("") + "</ul>";
   }
+  const f = fileOf(r);
+  html += f ? `<div class="card"><div class="small">📎 <strong>${esc(f.name)}</strong> · ${fmt(Number((f.size / 1024).toFixed(0)))} KB</div>
+      <div class="pdfbtns"><button class="mini" data-action="openPdf" data-hash="${r.fileHash}">Abrir PDF</button><button class="mini" data-action="openPdf" data-mode="download" data-hash="${r.fileHash}">Descargar</button></div></div>`
+    : `<div class="card"><div class="small muted">No hay PDF guardado de este informe. Impórtalo de nuevo y se guardará.</div></div>`;
   html += `<details class="card"><summary>Texto extraído del PDF</summary><pre>${esc(r.rawText)}</pre></details>
     <button class="danger-btn wide" data-action="delReport" data-id="${r.id}">Borrar este informe</button></main>`;
   return html;
 }
 
 function nav() {
-  const tabs = [["analisis", "Análisis", "🩸"], ["historico", "Histórico", "🗂️"], ["peso", "Peso", "⚖️"]];
+  const tabs = [["analisis", "Análisis", "🩸"], ["avances", "Avances", "📈"], ["historico", "Histórico", "🗂️"], ["peso", "Peso", "⚖️"]];
   if (["natural", "hormonal"].includes(patient()?.profile?.cycle?.mode)) tabs.push(["ciclo", "Ciclo", "🌙"]);
-  tabs.push(["informes", "Informes", "📄"]);
+  if (!state.readOnly || myReports().some((r) => r.pdf)) tabs.push(["informes", "Informes", "📄"]);
   return `<nav class="tabs">${tabs.map(([k, l, i]) => `<button data-action="tab" data-tab="${k}" class="${state.tab === k && !state.view ? "active" : ""}"><span>${i}</span>${l}</button>`).join("")}</nav>`;
 }
 
@@ -562,12 +767,13 @@ function render() {
   let html;
   const cur = patient();
   const locked = isLocked(cur);
+  if (state.mode === "portal" && !state.readOnly) { app.innerHTML = viewPortal(); return; }
   if (locked) html = viewLocked(cur);
   else if (state.view?.type === "analyte") html = viewAnalyte(state.view.key);
   else if (state.view?.type === "report") html = viewReport(state.view.id);
   else if (state.view?.type === "profile") html = viewProfile(false);
-  else if (!state.patients.length) html = viewProfile(true);
-  else html = state.tab === "peso" ? viewPeso() : state.tab === "ciclo" ? viewCiclo() : state.tab === "historico" ? viewHistorico() : state.tab === "informes" ? viewInformes() : viewAnalisis();
+  else if (!state.patients.length && !state.readOnly) html = viewProfile(true);
+  else html = state.tab === "avances" ? viewAvances() : state.tab === "peso" ? viewPeso() : state.tab === "ciclo" ? viewCiclo() : state.tab === "historico" ? viewHistorico() : state.tab === "informes" ? viewInformes() : viewAnalisis();
   app.innerHTML = html + (locked || !state.patients.length ? "" : nav()) + (state.busy ? `<div class="busy"><div class="spinner"></div>Leyendo PDF…</div>` : "");
   if (state.view) window.scrollTo(0, 0); else window.scrollTo(0, keepScroll);
 }
@@ -600,12 +806,22 @@ function askText(title, placeholder, onOk) {
 
 function showMenu() {
   const p = patient();
+  if (state.readOnly) {
+    showDialog("Menú", `<div class="menu"><button data-menu="logout">Cerrar sesión</button><p class="muted small">Por seguridad la sesión se cierra sola tras unos minutos sin actividad.</p></div>`);
+    document.querySelector("#dlg .menu").addEventListener("click", (e) => {
+      if (!e.target.closest("[data-menu=logout]")) return;
+      document.getElementById("dlg")?.remove(); leavePortal();
+    });
+    return;
+  }
   const protect = !p ? "" : !p.protection
     ? `<button data-menu="protect">Proteger «${esc(p.name)}» con contraseña</button>`
     : `<button data-menu="lock">Bloquear ahora</button><button data-menu="changePw">Cambiar contraseña</button><button data-menu="removePw">Quitar contraseña</button>`;
   showDialog("Menú", `<div class="menu">
       <button data-menu="newPatient">Nuevo paciente</button>
       ${p ? `<button data-menu="profile">Perfil del paciente (nombre, altura, sexo, nacimiento)</button>` : ""}
+      ${p && !isLocked(p) ? `<button data-menu="publish">Publicar resultados para el paciente</button>` : ""}
+      <button data-menu="asPatient">Ver como paciente (prueba)</button>
       ${protect}
       ${p ? `<button data-menu="delPatient" class="danger-text">Borrar paciente «${esc(p.name)}» y sus datos</button>` : ""}
       <button data-menu="export">Exportar copia de respaldo</button>
@@ -683,7 +899,14 @@ async function reencrypt(pat, newKey, newMeta) {
   const reports = [], weights = [];
   for (const r of state.reports.filter((x) => x.patientId === pat.id)) reports.push(await encodeRecord(updated, r, REPORT_FIELDS, newKey));
   for (const w of state.weights.filter((x) => x.patientId === pat.id)) weights.push(await encodeRecord(updated, w, WEIGHT_FIELDS, newKey));
-  await db.batchWrite({ patients: [updated], reports, weights });
+  const files = [], blobs = [];
+  for (const f of state.files.filter((x) => x.patientId === pat.id)) {
+    const bytes = await getPdfBytes(f);   // aún con la clave anterior
+    files.push(await encodeRecord(updated, f, FILE_FIELDS, newKey));
+    const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    blobs.push(newKey ? { id: f.id, patientId: pat.id, ...(await encryptBytes(newKey, new Uint8Array(copy))) } : { id: f.id, patientId: pat.id, data: copy });
+  }
+  await db.batchWrite({ patients: [updated], reports, weights, files, blobs });
   if (newKey) state.keys.set(pat.id, newKey); else state.keys.delete(pat.id);
   await load(); render();
 }
@@ -721,6 +944,7 @@ function removeProtection(pat) {
 }
 
 function lockAll() {
+  if (state.readOnly) { leavePortal(); return; }
   if (!state.keys.size) return;
   state.keys.clear(); state.view = null;
   document.getElementById("dlg")?.remove();
@@ -730,6 +954,8 @@ function lockAll() {
 async function menuAction(kind) {
   const p = patient();
   if (kind === "newPatient") return newPatient();
+  if (kind === "publish") return publishPatient(p);
+  if (kind === "asPatient") return setMode("portal");
   if (kind === "profile") { state.view = { type: "profile" }; return render(); }
   if (kind === "protect") return protectPatient(p, "set");
   if (kind === "changePw") return protectPatient(p, "change");
@@ -771,7 +997,7 @@ document.addEventListener("click", async (e) => {
   const el = e.target.closest("[data-action]");
   if (!el) return;
   const a = el.dataset.action;
-  if (a === "tab") { state.tab = el.dataset.tab; state.view = null; render(); }
+  if (a === "tab") { state.tab = el.dataset.tab; state.view = null; if (state.tab !== "avances") state.justAdded = null; render(); }
   else if (a === "back") { state.view = null; render(); }
   else if (a === "analyte") { state.view = { type: "analyte", key: el.dataset.key }; render(); }
   else if (a === "report") { state.view = { type: "report", id: Number(el.dataset.id) }; render(); }
@@ -779,6 +1005,8 @@ document.addEventListener("click", async (e) => {
   else if (a === "profile") { state.view = { type: "profile" }; render(); }
   else if (a === "calPrev" || a === "calNext") { const m = state.calMonth || { y: new Date().getFullYear(), m: new Date().getMonth() }; const d = new Date(m.y, m.m + (a === "calNext" ? 1 : -1), 1); state.calMonth = { y: d.getFullYear(), m: d.getMonth() }; render(); }
   else if (a === "periodStart") registerPeriod();
+  else if (a === "openPdf") openPdf(el.dataset.hash, el.dataset.mode === "download");
+  else if (a === "goAdmin") { location.hash = "#admin"; await setMode("admin"); }
   else if (a === "delStart") removePeriod(el.dataset.date);
   else if (a === "groupBy") { state.groupBy = el.dataset.mode; localStorage.setItem("groupBy", state.groupBy); render(); }
   else if (a === "exportCsv") exportCsv();
@@ -788,7 +1016,11 @@ document.addEventListener("click", async (e) => {
   else if (a === "delReport") {
     const id = Number(el.dataset.id);
     showDialog("¿Borrar informe?", "Se borrarán sus resultados. Esta acción no se puede deshacer.", [
-      { label: "Cancelar" }, { label: "Borrar", kind: "danger", onClick: async () => { await db.del("reports", id); state.view = null; await load(); render(); } }]);
+      { label: "Cancelar" }, { label: "Borrar", kind: "danger", onClick: async () => {
+        const rep = state.reports.find((x) => x.id === id), f = rep && fileOf(rep, rep.patientId);
+        await db.del("reports", id);
+        if (f) { await db.del("files", f.id); await db.del("blobs", f.id); }
+        state.view = null; await load(); render(); } }]);
   }
 });
 
@@ -811,7 +1043,7 @@ document.addEventListener("change", async (e) => {
     try {
       const r = await db.importBackup(JSON.parse(await f.text()));
       await load(); render();
-      showDialog("Copia importada", `Se agregaron ${r.addedReports} informes y ${r.addedWeights} registros de peso.` + (r.renamed ? ` ${r.renamed} paciente${r.renamed === 1 ? "" : "s"} tenía${r.renamed === 1 ? "" : "n"} el mismo nombre con otra contraseña y se agregó${r.renamed === 1 ? "" : "ron"} como «(respaldo)».` : ""));
+      showDialog("Copia importada", `Se agregaron ${r.addedReports} informes, ${r.addedWeights} registros de peso y ${r.addedFiles} PDF.` + (r.renamed ? ` ${r.renamed} paciente${r.renamed === 1 ? "" : "s"} tenía${r.renamed === 1 ? "" : "n"} el mismo nombre con otra contraseña y se agregó${r.renamed === 1 ? "" : "ron"} como «(respaldo)».` : ""));
     } catch (err) { showDialog("No se pudo importar", esc(err.message || "Archivo inválido.")); }
   }
   else if (t.id === "reportDate" && state.view?.type === "report" && t.value) {
@@ -844,6 +1076,7 @@ document.addEventListener("submit", async (e) => {
     render();
     return;
   }
+  if (e.target.id === "portalForm") { e.preventDefault(); const f = new FormData(e.target); await portalLogin(String(f.get("name")), String(f.get("pw"))); return; }
   if (e.target.id === "profileForm") { e.preventDefault(); await submitProfile(e.target); return; }
   if (e.target.id !== "weightForm") return;
   e.preventDefault();
@@ -873,12 +1106,14 @@ document.addEventListener("visibilitychange", () => {
   if (hiddenAt && Date.now() - hiddenAt > AWAY_MS) lockAll();
   hiddenAt = 0; touch();
 });
-setInterval(() => { if (state.keys.size && Date.now() - lastActive > IDLE_MS) lockAll(); }, 15000);
+setInterval(() => { if ((state.keys.size || state.readOnly) && Date.now() - lastActive > IDLE_MS) lockAll(); }, 15000);
+window.addEventListener("hashchange", async () => { if (state.readOnly) return; const m = await decideMode(); if (m !== state.mode) await setMode(m); });
 
 // ---------- Inicio ----------
 (async () => {
-  await load();
+  state.mode = await decideMode();
+  if (state.mode === "admin") { try { localStorage.setItem("mode", "admin"); } catch {} await load(); }
   render();
-  db.requestPersistence();
+  if (state.mode === "admin") db.requestPersistence();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
 })();
