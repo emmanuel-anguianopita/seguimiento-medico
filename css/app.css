@@ -167,3 +167,17 @@ table.hist th.latest small { display: block; color: var(--accent); font-weight: 
 .row.static .pdfbtns { flex-basis: 100%; margin: 4px 0 0; }
 .row.static:has(.pdfbtns) { flex-wrap: wrap; }
 .mini { border: 1px solid var(--line); background: var(--card); color: var(--accent); font-weight: 600; font-size: 13px; padding: 6px 12px; border-radius: 99px; }
+
+/* Pantalla de acceso */
+.gate { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; margin: 0; }
+.gate-box { width: 100%; max-width: 360px; text-align: center; }
+.gate-mark { width: 44px; height: 44px; margin: 0 auto 22px; border: 1px solid var(--text); border-radius: 50%; position: relative; opacity: .85; }
+.gate-mark::after { content: ""; position: absolute; inset: 12px; border-radius: 50%; background: var(--accent); }
+.gate-title { margin: 0; font: 400 28px/1.25 Georgia, "Times New Roman", serif; letter-spacing: .01em; }
+.gate-rule { width: 48px; height: 1px; background: var(--muted); margin: 22px auto 28px; opacity: .6; }
+.gate-form { display: flex; flex-direction: column; gap: 12px; text-align: left; }
+.gate-form select, .gate-form input { width: 100%; font-size: 16px; padding: 13px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); }
+.gate-form select:invalid { color: var(--muted); }
+.gate-form button { padding: 13px; letter-spacing: .06em; }
+.gate-form .err { min-height: 20px; text-align: center; }
+.cheer { margin: 12px 0 4px; padding: 10px 12px; border-left: 3px solid var(--ok); background: color-mix(in srgb, var(--ok) 9%, transparent); border-radius: 8px; font-size: 14px; font-style: italic; }

@@ -30,7 +30,7 @@ const state = {
   patientId: Number(localStorage.getItem("patientId")) || null,
   tab: "analisis", view: null, onlyOut: false, search: "", busy: false,
   keys: new Map(), unlockError: "", histSearch: "", histOnlyOut: false, calMonth: null,
-  readOnly: false, mode: "admin", justAdded: null, portalError: "", groupBy: localStorage.getItem("groupBy") === "system" ? "system" : "study",
+  readOnly: false, portalList: null, mode: "admin", justAdded: null, portalError: "", groupBy: localStorage.getItem("groupBy") === "system" ? "system" : "study",
 };
 const REPORT_FIELDS = ["date", "lab", "folio", "fileHash", "rawText", "results", "importedAt"];
 const FILE_FIELDS = ["hash", "name", "size"];
@@ -239,20 +239,34 @@ function viewLocked(p) {
 }
 
 function viewPortal() {
-  return `<header class="top"><h1 class="grow">Consulta de resultados</h1></header><main><div class="empty portal"><div class="logo">🩺</div>
-    <p><strong>Consulta tu histórico de resultados</strong></p>
-    <p class="muted">Escribe tu nombre completo, como aparece en tus estudios, y la contraseña que te dio tu médico.</p>
-    <form id="portalForm" class="form lockform"><input name="name" placeholder="Nombre completo" autocomplete="name" required>
-    <input type="password" name="pw" placeholder="Contraseña" autocomplete="current-password" required>
-    <button class="primary" type="submit">Ver mis resultados</button><div class="err" id="portalErr">${esc(state.portalError)}</div></form>
-    <button class="link" data-action="goAdmin">Acceso del profesional</button></div></main>`;
+  const list = state.portalList;
+  const opts = (list || []).map((x) => `<option value="${esc(x.id)}">${esc(x.label)}</option>`).join("");
+  const msg = list === null ? "Cargando…" : "";
+  return `<main class="gate"><div class="gate-box"><div class="gate-mark" aria-hidden="true"></div>
+    <h1 class="gate-title">Anatomía según<br>Emmanuel Anguiano</h1><div class="gate-rule"></div>
+    <form id="portalForm" class="gate-form" autocomplete="off">
+      <select name="pid" aria-label="Paciente" required><option value="" disabled selected>${list && !list.length ? "Sin pacientes disponibles" : "Selecciona tu nombre"}</option>${opts}</select>
+      <input type="password" name="pw" placeholder="Contraseña" autocomplete="current-password" aria-label="Contraseña" required>
+      <button class="primary" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? "Verificando…" : "Entrar"}</button>
+      <div class="err" id="portalErr">${esc(state.portalError || msg)}</div></form></div></main>`;
 }
 
-async function portalLogin(name, pw) {
-  state.busy = true; state.portalError = ""; render();
-  const fail = "No encontramos resultados con ese nombre y contraseña. Revisa que el nombre esté completo y escrito como en tus estudios.";
+async function loadPortalList() {
   try {
-    const id = await lookupId(name);
+    const res = await fetch("./data/pacientes.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("sin lista");
+    const j = await res.json();
+    state.portalList = (Array.isArray(j.pacientes) ? j.pacientes : []).filter((x) => x && x.id && x.label)
+      .sort((a, b) => a.label.localeCompare(b.label, "es"));
+  } catch { state.portalList = []; }
+  if (state.mode === "portal" && !state.readOnly) render();
+}
+
+async function portalLogin(id, pw) {
+  state.busy = true; state.portalError = ""; render();
+  const fail = "La contraseña no es correcta. Inténtalo de nuevo.";
+  try {
+    if (!/^[0-9a-f]{32}$/.test(id)) throw new Error("paciente");
     const res = await fetch(`./data/${id}.json`, { cache: "no-store" });
     if (!res.ok) throw new Error("no encontrado");
     const opened = await openBundleWithKey(await res.json(), pw);
@@ -274,7 +288,7 @@ async function leavePortal() {
   state.readOnly = false; state.patients = []; state.reports = []; state.weights = []; state.files = []; state.patientId = null; state.view = null; state.tab = "analisis";
   state.portalKey = null; state.portalId = null;
   document.getElementById("dlg")?.remove();
-  if (state.mode === "admin") await load();
+  if (state.mode === "admin") await load(); else loadPortalList();
   render();
 }
 
@@ -285,6 +299,7 @@ async function setMode(mode) {
   if (mode === "admin") await load();
   state.view = null; state.tab = "analisis"; state.portalError = "";
   render();
+  if (mode === "portal") loadPortalList();
 }
 async function decideMode() {
   const h = location.hash;
@@ -329,17 +344,23 @@ function publishPatient(pat) {
   let file = null, info = null;
   const d = showForm({
     title: "Publicar para el paciente",
-    intro: `Se crea un paquete cifrado con los resultados y los PDF de <strong>${esc(pat.name)}</strong>. El paciente lo abre con su nombre completo y esta contraseña. Compártesela por un medio distinto al paquete y usa al menos ${MIN_PASSWORD} caracteres.`,
-    fields: [{ name: "pw", label: `Contraseña del paciente (mínimo ${MIN_PASSWORD} caracteres)`, autocomplete: "new-password" }, { name: "pw2", label: "Repite la contraseña", autocomplete: "new-password" }],
+    intro: `Se crea un paquete cifrado con los resultados y los PDF de <strong>${esc(pat.name)}</strong>. El paciente elige su nombre en la lista de acceso y escribe esta contraseña. Ojo: el nombre de la lista es visible para quien abra la dirección de la aplicación; puedes usar un nombre corto o un apodo. Compártesela por un medio distinto al paquete y usa al menos ${MIN_PASSWORD} caracteres.`,
+    fields: [{ name: "label", label: "Nombre que aparecerá en la lista de acceso", type: "text", value: pat.published?.label || pat.name },
+      { name: "pw", label: `Contraseña del paciente (mínimo ${MIN_PASSWORD} caracteres)`, autocomplete: "new-password" }, { name: "pw2", label: "Repite la contraseña", autocomplete: "new-password" }],
     okLabel: "Crear archivo",
-    onSubmit: async ({ pw, pw2 }) => {
+    onSubmit: async ({ label, pw, pw2 }) => {
+      label = String(label || "").trim().slice(0, 80);
+      if (!label) return "Escribe el nombre que aparecerá en la lista.";
       if (pw.length < MIN_PASSWORD) return `La contraseña debe tener al menos ${MIN_PASSWORD} caracteres.`;
       if (pw !== pw2) return "Las contraseñas no coinciden.";
       const reports = state.reports.filter((r) => r.patientId === pat.id), weights = state.weights.filter((w) => w.patientId === pat.id);
       const pdfs = [];
       for (const f of state.files.filter((x) => x.patientId === pat.id)) pdfs.push({ hash: f.hash, bytes: await getPdfBytes(f) });
       const out = await buildBundle(pat, reports, weights, pw, pdfs);
-      const zip = makeZip([{ name: `${out.id}.json`, data: new TextEncoder().encode(out.json) }, ...out.files]);
+      pat.published = { label, id: out.id }; await savePatient(pat);
+      const lista = (await db.all("patients")).filter((x) => x.published?.id && x.published?.label).map((x) => ({ id: x.published.id, label: x.published.label }));
+      const zip = makeZip([{ name: `pacientes.json`, data: new TextEncoder().encode(JSON.stringify({ v: 1, pacientes: lista })) },
+        { name: `${out.id}.json`, data: new TextEncoder().encode(out.json) }, ...out.files]);
       file = new File([zip], `resultados-${out.id.slice(0, 8)}.zip`, { type: "application/zip" });
       info = { pdfs: pdfs.length, missing: reports.filter((r) => !out.payload.reports.find((x) => x.id === r.id)?.pdf).length };
     },
@@ -348,9 +369,9 @@ function publishPatient(pat) {
     if (e.detail !== true || !file) return;
     showDialog("Paquete listo", `<p><strong>${esc(file.name)}</strong> · ${info.pdfs} PDF cifrado${info.pdfs === 1 ? "" : "s"}</p>
       ${info.missing ? `<p class="small muted">${info.missing} estudio${info.missing === 1 ? "" : "s"} no tiene${info.missing === 1 ? "" : "n"} PDF guardado: vuelve a importar ese PDF y publica de nuevo para incluirlo.</p>` : ""}
-      <ol class="small"><li>Guarda el .zip y ábrelo. Contiene un archivo .json y una carpeta con el mismo código. Copia ambos dentro de la carpeta <strong>data</strong> del repositorio (créala la primera vez) y reemplaza si ya existen.</li>
+      <ol class="small"><li>Guarda el .zip y ábrelo. Contiene <strong>pacientes.json</strong> (la lista de acceso), un archivo .json y una carpeta con el mismo código. Copia todo dentro de la carpeta <strong>data</strong> del repositorio (créala la primera vez) y reemplaza si ya existen.</li>
       <li>En GitHub Desktop escribe un resumen, pulsa <strong>Commit to main</strong> y luego <strong>Push origin</strong>.</li>
-      <li>En un par de minutos el paciente podrá consultar sus resultados con su nombre y contraseña.</li></ol>
+      <li>En un par de minutos el paciente podrá elegir su nombre en la lista y consultar sus resultados con su contraseña.</li></ol>
       <p class="small muted">Repite este proceso cada vez que importes estudios nuevos, usando la misma contraseña.</p>`,
       [{ label: "Cerrar" }, { label: "Guardar archivo", onClick: deliverFile(file) }]);
   });
@@ -677,6 +698,7 @@ function compositionCard(w, prof) {
   let html = `<div class="card comp"><div class="muted small">Composición corporal · ${fmtDate(w.date)}</div>
     <div class="compHead st-${c.level === "sin datos" ? "normal" : c.level}">${esc(c.headline)}</div>
     <ul class="list">${line("IMC", c.bmi, "")}${line("Grasa corporal", c.fat, " %")}${line("Agua corporal", c.water, " %")}${line("Masa ósea", c.bone, " kg")}</ul>`;
+  if (c.bmi) html += `<p class="cheer">Lo estás logrando: tu constancia se nota y tienes un cuerpo extraordinario. Sigue así.</p>`;
   if (c.fat) html += `<p class="small">Masa grasa: <strong>${fmt(c.fatMassKg)} kg</strong> · Masa magra: <strong>${fmt(c.leanMassKg)} kg</strong>${c.waterKg ? ` · Agua: <strong>${fmt(c.waterKg)} kg</strong>` : ""}</p>`;
   if (c.paragraphs.length) html += `<p class="small">${c.paragraphs.map(esc).join(" ")}</p>`;
   if (c.missing.length) html += `<p class="small muted">Para una evaluación completa falta ${esc(c.missing.join(", "))} en el perfil.</p>${state.readOnly ? "" : `<button class="link" data-action="profile">Completar perfil</button>`}`;
@@ -1076,7 +1098,7 @@ document.addEventListener("submit", async (e) => {
     render();
     return;
   }
-  if (e.target.id === "portalForm") { e.preventDefault(); const f = new FormData(e.target); await portalLogin(String(f.get("name")), String(f.get("pw"))); return; }
+  if (e.target.id === "portalForm") { e.preventDefault(); const f = new FormData(e.target); await portalLogin(String(f.get("pid")), String(f.get("pw"))); return; }
   if (e.target.id === "profileForm") { e.preventDefault(); await submitProfile(e.target); return; }
   if (e.target.id !== "weightForm") return;
   e.preventDefault();
@@ -1114,6 +1136,7 @@ window.addEventListener("hashchange", async () => { if (state.readOnly) return; 
   state.mode = await decideMode();
   if (state.mode === "admin") { try { localStorage.setItem("mode", "admin"); } catch {} await load(); }
   render();
+  if (state.mode === "portal") loadPortalList();
   if (state.mode === "admin") db.requestPersistence();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
 })();

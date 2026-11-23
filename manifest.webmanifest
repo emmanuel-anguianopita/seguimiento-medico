@@ -1,6 +1,6 @@
 {
-  "name": "Seguimiento médico",
-  "short_name": "Seguimiento",
+  "name": "Anatomía según Emmanuel Anguiano",
+  "short_name": "Anatomía",
   "description": "Historia de análisis de sangre y peso, con lectura automática de PDF. Los datos se quedan en el dispositivo.",
   "lang": "es",
   "start_url": "./index.html",

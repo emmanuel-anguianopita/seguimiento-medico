@@ -97,3 +97,12 @@ En Análisis e Histórico hay un selector «Agrupar por: Estudio / Sistema u ór
 - La página incluye etiquetas para que Google y otros buscadores **no la indexen** (`noindex`, `nofollow`, `noarchive`). Funcionan cuando el buscador visita la página, por eso no se usa un `robots.txt` que lo impida. Si la dirección ya apareció en Google, pide su retiro en Google Search Console (herramienta «Eliminaciones»).
 - No hay ningún enlace público a los archivos de pacientes y sus nombres son un código derivado del nombre del paciente.
 - Contraseñas: al menos 12 caracteres; lo ideal son 4 palabras al azar sin relación entre sí.
+
+
+# Pantalla de acceso con lista de pacientes
+
+- **Primera pantalla del paciente:** solo muestra la leyenda «Anatomía según Emmanuel Anguiano», una lista desplegable con los nombres y el campo de contraseña. Sin elegir el nombre y escribir la contraseña correcta no se ve ningún resultado.
+- **Lista de pacientes:** se publica en `data/pacientes.json`. Cada vez que usas ⋯ → **Publicar resultados para el paciente**, el `.zip` trae ese archivo actualizado con todos los pacientes que has publicado desde ese dispositivo, más el archivo cifrado del paciente y sus PDF. Copia todo dentro de la carpeta `data` del repositorio y reemplaza.
+- **Privacidad de la lista:** los nombres de la lista son visibles para quien abra la dirección. Al publicar puedes escribir el «Nombre que aparecerá en la lista de acceso» (por ejemplo, un nombre corto o un apodo). Los resultados y los PDF siguen cifrados con la contraseña de cada paciente.
+- **Frase de ánimo:** la tarjeta de composición corporal (donde aparece el IMC) muestra «Lo estás logrando: tu constancia se nota y tienes un cuerpo extraordinario. Sigue así.»
+- Para entrar como profesional, abre la dirección terminada en `#admin`; ya no hay enlace visible en la pantalla de acceso.
