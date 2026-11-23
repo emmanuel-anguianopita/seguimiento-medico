@@ -38,3 +38,29 @@ Si cambias algún archivo, aumenta el número de versión en `sw.js` (la línea 
 ## Si un PDF no se lee bien
 En Informes, abre el informe y copia el "Texto extraído del PDF". Con ese texto se ajusta el lector (`js/parser.js`).
 Los PDF escaneados (imágenes) todavía no se pueden leer: necesitan reconocimiento óptico de texto.
+
+
+## Novedades de esta versión
+
+- **Saludo:** la pantalla principal dice «¡Bienvenido Nombre!». El nombre sale del paciente; puede cambiarse en ⋯ → Perfil del paciente.
+- **Histórico:** pestaña nueva con todos los indicadores en filas y las fechas de cada informe en columnas, coloreados por estado. Tocar un indicador abre su gráfica. Incluye búsqueda, filtro y exportación a CSV.
+- **Peso y composición corporal:** además del peso se capturan % de grasa, % de agua y masa ósea (kg). El IMC se calcula solo con la altura del perfil, y la tarjeta de composición evalúa cada valor según sexo y edad. Es una lectura informativa, no un diagnóstico.
+- **Perfil del paciente:** altura, sexo y fecha de nacimiento (se toman del PDF cuando vienen). Si el paciente tiene contraseña, el perfil también se guarda cifrado.
+- **Formatos de laboratorio:** la lista está en `js/parser.js` (`LAB_PROFILES`). Si un PDF no se reconoce, el aviso ofrece «Copiar texto del PDF» para pasarlo y agregar el formato nuevo.
+
+Al publicar, reemplaza todos los archivos del repositorio por los de esta versión; la caché se actualiza sola (versión v3).
+
+
+## Formato agregado: Laboratorio Universidad de Guadalajara (inmunología)
+
+Lee proteína C reactiva, tiroides, sedimentación, anticuerpos (anti-CCP, factor reumatoide, HLA-B27, ANCA, antinucleares, perfil de 18 anticuerpos), biometría hemática y química hepática. Aparece una categoría nueva, «Inmunología». El nombre del paciente se reconoce aunque el laboratorio ponga primero el nombre y después los apellidos.
+
+## Clasificación por sistema u órgano
+
+En Análisis e Histórico hay un selector «Agrupar por: Estudio / Sistema u órgano». La clasificación está en `js/systems.js` y se puede ajustar. El CSV exportado incluye una columna «Sistema u órgano». La elección se recuerda en el dispositivo.
+
+## Cuestionario inicial y calendario menstrual
+
+- **Primera pantalla:** al abrir la aplicación sin datos aparece un cuestionario con nombre, fecha de nacimiento (calcula la edad), género, peso, altura, raza u origen (opcional) y, si se desea, el calendario menstrual. También se puede abrir después en ⋯ → Perfil del paciente.
+- **Calendario menstrual (opcional):** pregunta la fecha de la última regla, la duración del ciclo y de la regla, y si los ciclos son regulares. La pestaña «Ciclo» muestra la fase, el día del ciclo, la próxima regla, la ovulación y la ventana fértil estimadas, un calendario por mes y permite registrar cada inicio de regla (el promedio del ciclo se ajusta con el historial). Es una estimación y no sirve como método anticonceptivo.
+- La raza solo se guarda como dato de contexto y no cambia ningún cálculo. El perfil completo, incluido el ciclo, se cifra si el paciente tiene contraseña.

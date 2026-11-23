@@ -88,3 +88,55 @@ dialog h3 { margin: 0 0 10px; font-size: 18px; }
 .menu { display: flex; flex-direction: column; } .menu button { text-align: left; background: none; border: 0; padding: 12px 4px; border-bottom: 1px solid var(--line); font-size: 16px; }
 .err { color: var(--high); font-size: 13px; min-height: 18px; }
 .lockform { width: 100%; max-width: 320px; }
+
+/* Saludo, histórico y composición corporal */
+.hello { text-transform: none; letter-spacing: 0; color: inherit; font-size: 22px; margin: 6px 0 4px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; }
+.grid3 label { min-width: 0; }
+.histwrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 14px; -webkit-overflow-scrolling: touch; }
+table.hist { border-collapse: separate; border-spacing: 0; font-size: 13px; min-width: 100%; }
+table.hist th, table.hist td { padding: 7px 9px; text-align: center; white-space: nowrap; border-bottom: 1px solid var(--line); }
+table.hist thead th { font-size: 11px; color: var(--muted); font-weight: 600; }
+table.hist .sticky { position: sticky; left: 0; z-index: 1; background: var(--card); text-align: left; max-width: 140px; border-right: 1px solid var(--line); }
+table.hist .sticky button { background: none; border: 0; padding: 0; text-align: left; font: inherit; font-weight: 600; color: inherit; white-space: normal; }
+table.hist .sticky small { display: block; font-weight: 400; color: var(--muted); font-size: 10px; }
+table.hist td.none { color: var(--muted); }
+.compHead { font-weight: 700; padding: 8px 10px; border-radius: 10px; margin: 6px 0 10px; }
+.comp .list { margin-bottom: 8px; }
+.comp .badge { display: inline-block; max-width: 150px; white-space: normal; text-align: right; }
+.tabs button { font-size: 10px; }
+table.hist .sticky { width: 104px; min-width: 104px; max-width: 104px; padding: 5px 6px; }
+table.hist .sticky button { font-size: 11.5px; line-height: 1.2; }
+table.hist td { font-size: 12.5px; padding: 5px 8px; }
+
+.seg { display: flex; align-items: center; gap: 6px; margin: 6px 0 2px; flex-wrap: wrap; }
+.seg button { border: 1px solid var(--line); background: var(--card); color: inherit; border-radius: 99px; padding: 5px 12px; font-size: 13px; }
+.seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+/* Cuestionario y ciclo */
+fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin: 6px 0; display: grid; gap: 10px; }
+fieldset[hidden], [hidden] { display: none !important; }
+legend { font-size: 12px; color: var(--muted); padding: 0 6px; }
+.form select { width: 100%; }
+.cyc .phase { display: inline-block; margin: 6px 0; padding: 4px 12px; border-radius: 99px; color: #fff; background: var(--c); font-weight: 700; }
+.cyc .of { font-size: 16px; font-weight: 500; color: var(--muted); }
+.facts { margin: 8px 0; padding-left: 18px; font-size: 14px; }
+.facts li { margin: 3px 0; }
+.calhead { display: flex; align-items: center; justify-content: space-between; text-transform: capitalize; margin-bottom: 6px; }
+.cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; text-align: center; }
+.cal .dow { font-size: 11px; color: var(--muted); }
+.cal .day { position: relative; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border-radius: 10px; font-size: 13px;
+  background: color-mix(in srgb, var(--c) 22%, transparent); }
+.cal .day.fertile { box-shadow: inset 0 -3px 0 #3a9d6b; }
+.cal .day.today { outline: 2px solid var(--text, #111); font-weight: 700; }
+.cal .day.start::after { content: ""; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: #d64550; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 10px; font-size: 11px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 4px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.legend i.ring { background: transparent; box-shadow: inset 0 -3px 0 #3a9d6b; border: 1px solid var(--line); }
+.legend i.dot { width: 7px; height: 7px; border-radius: 50%; background: #d64550; }
+.form select { -webkit-appearance: none; appearance: none; font-size: 16px; padding: 10px 34px 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%236b7280' stroke-width='2'/%3E%3C/svg%3E") no-repeat right 12px center; color: var(--text); min-height: 44px; }
+.form label.check { flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; font-size: 14px; }
+.form label.check input { width: 20px; height: 20px; padding: 0; flex: none; }
+.calhead strong::first-letter { text-transform: uppercase; }
+.calhead { text-transform: none; }

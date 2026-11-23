@@ -1,10 +1,13 @@
-import { parseDocument } from "./parser.js";
+import { parseDocument, SUPPORTED_LABS } from "./parser.js";
+import { compose, bmi as calcBmi } from "./composition.js";
+import { SYSTEM_NAMES, systemOf, systemIcon } from "./systems.js";
+import { PHASES, phaseOn, monthGrid, addDays, cycleLength } from "./cycle.js";
 import { pdfToPages } from "./pdftext.js";
 import * as db from "./db.js";
 import { lineChart, sparkline, fmt } from "./charts.js";
 import { makeProtection, tryUnlock, encryptJSON, decryptJSON } from "./crypto.js";
 
-const CATEGORIES = ["Hematología", "Química clínica", "Orina", "Otros"];
+const CATEGORIES = ["Hematología", "Química clínica", "Inmunología", "Orina", "Otros"];
 const STATUS = {
   normal: { label: "Normal", icon: "✓" },
   bajo: { label: "Bajo", icon: "▼" },
@@ -23,16 +26,19 @@ const state = {
   patients: [], reports: [], weights: [],
   patientId: Number(localStorage.getItem("patientId")) || null,
   tab: "analisis", view: null, onlyOut: false, search: "", busy: false,
-  keys: new Map(), unlockError: "",
+  keys: new Map(), unlockError: "", histSearch: "", histOnlyOut: false, calMonth: null, groupBy: localStorage.getItem("groupBy") === "system" ? "system" : "study",
 };
 const REPORT_FIELDS = ["date", "lab", "folio", "fileHash", "rawText", "results", "importedAt"];
-const WEIGHT_FIELDS = ["date", "kg", "note"];
+const WEIGHT_FIELDS = ["date", "kg", "note", "fatPct", "waterPct", "boneKg"];
 const pick = (o, fields) => Object.fromEntries(fields.map((f) => [f, o[f]]));
 const isLocked = (p) => !!p && !!p.protection && !state.keys.has(p.id);
 
 // ---------- Datos ----------
 async function load() {
   state.patients = (await db.all("patients")).sort((a, b) => a.name.localeCompare(b.name, "es"));
+  for (const p of state.patients) {
+    if (p.profileEnc && state.keys.has(p.id)) { try { p.profile = await decryptJSON(state.keys.get(p.id), p.profileEnc); } catch { /* perfil dañado */ } }
+  }
   const decode = async (rows) => {
     const out = [];
     for (const r of rows) {
@@ -57,6 +63,25 @@ async function encodeRecord(pat, rec, fields, key = state.keys.get(pat.id)) {
   else Object.assign(out, pick(rec, fields));
   return out;
 }
+/** Guarda al paciente. Si tiene contraseña, su perfil (altura, sexo, nacimiento, saludo) se guarda cifrado. */
+async function savePatient(pat) {
+  const rec = { ...pat };
+  if (pat.protection) {
+    delete rec.profile;
+    rec.profileEnc = await encryptJSON(state.keys.get(pat.id), pat.profile || {});
+    pat.profileEnc = rec.profileEnc;
+  } else delete rec.profileEnc;
+  if (rec.id == null) delete rec.id;
+  pat.id = await db.put("patients", rec);
+}
+const birthOf = (p) => p?.profile?.birthDate ?? p?.birthDate ?? null;
+async function fillProfile(pat, parsed) {
+  const prof = { ...(pat.profile || {}) };
+  let changed = false;
+  if (!birthOf(pat) && parsed.birth) { prof.birthDate = parsed.birth; changed = true; }
+  if (!prof.sex && parsed.sex) { prof.sex = parsed.sex; changed = true; }
+  if (changed) { pat.profile = prof; await savePatient(pat); }
+}
 async function saveReport(pat, report) { report.id = await db.put("reports", await encodeRecord(pat, report, REPORT_FIELDS)); }
 async function saveWeight(pat, w) { w.id = await db.put("weights", await encodeRecord(pat, w, WEIGHT_FIELDS)); }
 
@@ -67,7 +92,7 @@ const myWeights = () => state.weights.filter((w) => w.patientId === state.patien
 function buildSeries() {
   const map = new Map();
   for (const r of myReports()) for (const x of r.results) {
-    const pt = { date: r.date, t: toTime(r.date), value: x.value, text: x.text, unit: x.unit, status: x.status,
+    const pt = { rid: r.id, date: r.date, t: toTime(r.date), value: x.value, text: x.text, unit: x.unit, status: x.status,
       refLow: x.refLow, refHigh: x.refHigh, refKind: x.refKind, refText: x.refText };
     const s = map.get(x.key);
     if (s) { s.points.push(pt); s.name = x.name; s.category = x.category; }
@@ -114,25 +139,26 @@ async function importFiles(files) {
         if (state.reports.some((r) => r.fileHash === hash)) { outcomes.push({ name: f.name, ok: false, msg: "Este PDF ya estaba importado." }); continue; }
         const pages = await pdfToPages(pdfjs, new Uint8Array(buf));
         const parsed = parseDocument(pages);
+        const rawText = pages.map((p, i) => `— Página ${i + 1} —\n${p.join("\n")}`).join("\n");
         if (!parsed.results.length) {
-          outcomes.push({ name: f.name, ok: false, msg: "No se reconocieron resultados. Puede ser un PDF escaneado (imagen) o un formato de laboratorio todavía no soportado." });
+          outcomes.push({ name: f.name, ok: false, raw: rawText, msg: "No se reconocieron resultados. Puede ser un PDF escaneado (imagen) o un formato de laboratorio todavía no soportado." });
           continue;
         }
         let pat;
         if (parsed.patient) {
           const key = makeKey(parsed.patient);
-          pat = state.patients.find((p) => p.nameKey === key);
-          if (!pat) { pat = { name: toTitle(parsed.patient), nameKey: key, birthDate: parsed.birth }; pat.id = await db.put("patients", pat); state.patients.push(pat); }
-          else if (!pat.birthDate && parsed.birth && !pat.protection) { pat.birthDate = parsed.birth; await db.put("patients", pat); }
+          const sorted = (k) => k.split(" ").sort().join(" ");   // algunos laboratorios ponen primero el nombre y otros los apellidos
+          pat = state.patients.find((p) => p.nameKey === key) || state.patients.find((p) => !p.nameKey.includes("(RESPALDO)") && sorted(p.nameKey) === sorted(key));
+          if (!pat) { pat = { name: toTitle(parsed.patient), nameKey: key, profile: { birthDate: parsed.birth, sex: parsed.sex } }; await savePatient(pat); state.patients.push(pat); }
         } else {
           pat = patient();
-          if (!pat) { pat = { name: "Paciente", nameKey: "PACIENTE", birthDate: null }; pat.id = await db.put("patients", pat); state.patients.push(pat); }
+          if (!pat) { pat = { name: "Paciente", nameKey: "PACIENTE", profile: {} }; await savePatient(pat); state.patients.push(pat); }
         }
         if (isLocked(pat)) {
           if (!(await requestUnlock(pat))) { outcomes.push({ name: f.name, ok: false, msg: `«${pat.name}» está protegido con contraseña y no se desbloqueó. El PDF no se importó.` }); continue; }
           if (state.reports.some((r) => r.fileHash === hash)) { outcomes.push({ name: f.name, ok: false, msg: "Este PDF ya estaba importado." }); continue; }
         }
-        const rawText = pages.map((p, i) => `— Página ${i + 1} —\n${p.join("\n")}`).join("\n");
+        await fillProfile(pat, parsed);
         const report = { patientId: pat.id, date: parsed.date || todayIso(), lab: parsed.lab, folio: parsed.folio || "",
           fileHash: hash, rawText, results: parsed.results, importedAt: new Date().toISOString() };
         await saveReport(pat, report);
@@ -150,7 +176,18 @@ async function importFiles(files) {
     outcomes.push({ name: "PDF", ok: false, msg: "No se pudo cargar el lector de PDF." });
   }
   state.busy = false; await load(); render();
-  showDialog("Resultado de la importación", outcomes.map((o) => `<div class="out ${o.ok ? "ok" : "bad"}"><strong>${o.ok ? "✓" : "!"} ${esc(o.name)}</strong><span>${esc(o.msg)}</span></div>`).join(""));
+  const unknown = outcomes.filter((o) => o.raw);
+  const actions = [{ label: "Listo" }];
+  if (unknown.length) actions.unshift({ label: "Copiar texto del PDF", onClick: () => copyUnknown(unknown) });
+  showDialog("Resultado de la importación", outcomes.map((o) => `<div class="out ${o.ok ? "ok" : "bad"}"><strong>${o.ok ? "✓" : "!"} ${esc(o.name)}</strong><span>${esc(o.msg)}</span></div>`).join("") +
+    (unknown.length ? `<p class="small muted">Si es un formato nuevo, copia el texto y pégalo en la conversación para añadirlo a la lista de formatos compatibles.</p>` : ""), actions);
+}
+
+async function copyUnknown(list) {
+  const text = list.map((o) => `### ${o.name}\n${o.raw}`).join("\n\n");
+  const note = "Contiene los datos del PDF, incluido el nombre del paciente. Revísalo antes de compartirlo.";
+  try { await navigator.clipboard.writeText(text); showDialog("Texto copiado", note); }
+  catch { showDialog("Copia el texto manualmente", `${esc(note)}<pre>${esc(text)}</pre>`); }
 }
 
 // ---------- Vistas ----------
@@ -167,19 +204,198 @@ function viewLocked(p) {
     <button class="primary" type="submit">Desbloquear</button><div class="err">${esc(state.unlockError)}</div></form></div></main>`;
 }
 
+const GENDERS = [["", "Selecciona"], ["F", "Mujer"], ["M", "Hombre"], ["X", "No binario"], ["N", "Prefiero no decir"]];
+const RACES = [["", "Prefiero no decir"], ["mestiza", "Mestiza"], ["indigena", "Indígena"], ["blanca", "Blanca"], ["afro", "Afrodescendiente"], ["asiatica", "Asiática"], ["otra", "Otra"]];
+const opts = (list, val) => list.map(([v, l]) => `<option value="${v}" ${v === (val ?? "") ? "selected" : ""}>${esc(l)}</option>`).join("");
+const ageText = (birth) => { const a = ageYears(birth); return a === null || a < 0 || a > 120 ? "" : `Edad: ${a} años`; };
+
+/** Cuestionario inicial. Con isNew crea al paciente; si no, edita el perfil del paciente actual. */
+function viewProfile(isNew) {
+  const pat = isNew ? null : patient();
+  const pr = pat?.profile || {};
+  const cy = pr.cycle || {};
+  const lastW = pat ? myWeights().slice(-1)[0] : null;
+  const gender = pr.gender || (pr.sex === "F" ? "F" : pr.sex === "M" ? "M" : "");
+  const cycleOn = !!cy.mode && cy.mode !== "off";
+  const lastStart = [...(cy.starts || [])].sort().slice(-1)[0] || "";
+  const body = `<form id="profileForm" class="card form" data-new="${isNew ? 1 : 0}">
+    <p class="small muted">${isNew ? "Responde unas preguntas para personalizar la aplicación. Todo se queda en este dispositivo y puedes cambiarlo después en ⋯ → Perfil del paciente." : "Estos datos se usan para el IMC, la composición corporal y el calendario menstrual."}</p>
+    ${isNew ? `<label>Nombre completo<input name="fullName" required autocomplete="name" placeholder="Nombre y apellidos"></label>`
+            : `<label>Nombre para el saludo<input name="greetName" value="${esc(pr.greetName || pat?.name || "")}"></label>`}
+    <label>Fecha de nacimiento<input type="date" id="qBirth" name="birthDate" value="${esc(pr.birthDate || "")}" max="${todayIso()}" required></label>
+    <div class="small" id="qAge">${esc(ageText(pr.birthDate))}</div>
+    <label>Género<select name="gender" id="qGender" required>${opts(GENDERS, gender)}</select></label>
+    <label id="sexRow" ${gender === "X" || gender === "N" ? "" : "hidden"}>Para las referencias clínicas (grasa corporal) usar el rango<select name="sex">${opts([["", "Sin indicar"], ["F", "Femenino"], ["M", "Masculino"]], gender === "X" || gender === "N" ? pr.sex : "")}</select></label>
+    <div class="grid2"><label>Peso (kg)<input name="kg" inputmode="decimal" placeholder="70.5" value="${lastW ? esc(lastW.kg) : ""}" ${isNew ? "required" : ""}></label>
+    <label>Altura (cm)<input name="heightCm" inputmode="decimal" placeholder="165" value="${esc(pr.heightCm ?? "")}"></label></div>
+    <label>Raza u origen (opcional)<select name="race">${opts(RACES, pr.race)}</select></label>
+    <p class="small muted">La raza solo se guarda como dato de contexto; no cambia ningún cálculo.</p>
+    <label class="check" id="cycleRow" ${gender === "M" ? "hidden" : ""}><input type="checkbox" name="cycleOn" id="qCycleOn" ${cycleOn ? "checked" : ""}> Quiero llevar un calendario menstrual</label>
+    <fieldset id="cycleBlock" ${cycleOn && gender !== "M" ? "" : "hidden"}><legend>Calendario menstrual</legend>
+      <label>Situación actual<select name="cycleMode" id="qCycleMode">${opts([["natural", "Ciclo menstrual natural"], ["hormonal", "Uso anticonceptivo hormonal"], ["none", "Embarazo, posparto o menopausia"]], cy.mode === "hormonal" || cy.mode === "none" ? cy.mode : "natural")}</select></label>
+      <div id="naturalFields" ${cy.mode === "hormonal" || cy.mode === "none" ? "hidden" : ""}>
+        <label>Primer día de tu última regla<input type="date" name="lastStart" value="${esc(lastStart)}" max="${todayIso()}"></label>
+        <div class="grid2"><label>Ciclo (días)<input name="cycleLength" inputmode="numeric" value="${esc(cy.cycleLength ?? 28)}"></label>
+        <label>Regla (días)<input name="periodLength" inputmode="numeric" value="${esc(cy.periodLength ?? 5)}"></label></div>
+        <label>¿Tus ciclos son regulares?<select name="regular">${opts([["si", "Sí"], ["no", "No"], ["", "No lo sé"]], cy.regular ?? "si")}</select></label>
+        <p class="small muted">El ciclo se cuenta desde el primer día de la regla hasta el día anterior a la siguiente (lo habitual son 21 a 35 días).</p>
+      </div>
+      <p class="small muted" id="hormNote" ${cy.mode === "hormonal" ? "" : "hidden"}>Con anticonceptivos hormonales no hay un ciclo natural con ovulación, por lo que no se calculan fases.</p>
+    </fieldset>
+    <div class="err" id="qErr"></div>
+    <button class="primary" type="submit">${isNew ? "Continuar" : "Guardar"}</button>
+    ${isNew ? `<button class="link" type="button" data-action="import">Prefiero importar un PDF primero</button>` : ""}
+  </form>`;
+  if (isNew) return `<header class="top"><h1>Bienvenido</h1></header><main><h2 class="hello">Cuéntanos sobre ti</h2>${body}</main>`;
+  return `${header("Perfil del paciente", true)}<main>${body}</main>`;
+}
+
+function ageYears(birth) {
+  if (!birth) return null;
+  const b = new Date(birth + "T12:00:00"), n = new Date();
+  let a = n.getFullYear() - b.getFullYear();
+  if (n.getMonth() < b.getMonth() || (n.getMonth() === b.getMonth() && n.getDate() < b.getDate())) a--;
+  return a;
+}
+
+async function submitProfile(form) {
+  const isNew = form.dataset.new === "1";
+  const f = new FormData(form);
+  const err = (m) => { document.getElementById("qErr").textContent = m; };
+  const num = (n) => { const r = String(f.get(n) || "").trim().replace(",", "."); return r === "" ? null : parseFloat(r); };
+  const birthDate = String(f.get("birthDate") || "");
+  const age = ageYears(birthDate);
+  if (!birthDate || age === null || age < 0 || age > 120) return err("Escribe una fecha de nacimiento válida.");
+  const gender = String(f.get("gender") || "");
+  if (!gender) return err("Selecciona tu género.");
+  const kg = num("kg"), heightCm = num("heightCm");
+  if (kg !== null && !(kg >= 20 && kg <= 400)) return err("Escribe un peso entre 20 y 400 kg.");
+  if (isNew && kg === null) return err("Escribe tu peso.");
+  if (heightCm !== null && !(heightCm >= 90 && heightCm <= 230)) return err("Escribe una altura entre 90 y 230 cm.");
+  const sex = gender === "F" ? "F" : gender === "M" ? "M" : String(f.get("sex") || "") || null;
+  const pat = isNew ? { name: "", nameKey: "", profile: {} } : patient();
+  if (isNew) {
+    const name = String(f.get("fullName") || "").trim().replace(/\s+/g, " ");
+    if (name.length < 3) return err("Escribe tu nombre completo.");
+    pat.name = name; pat.nameKey = makeKey(name);
+  }
+  const prev = pat.profile || {};
+  let cycle = { ...(prev.cycle || {}), mode: "off" };
+  if (f.get("cycleOn") && gender !== "M") {
+    const mode = String(f.get("cycleMode"));
+    if (mode === "natural") {
+      const lastStart = String(f.get("lastStart") || "");
+      const cl = num("cycleLength"), pl = num("periodLength");
+      if (!lastStart || lastStart > todayIso()) return err("Indica el primer día de tu última regla.");
+      if (!(cl >= 21 && cl <= 45)) return err("La duración del ciclo debe estar entre 21 y 45 días.");
+      if (!(pl >= 2 && pl <= 10)) return err("La duración de la regla debe estar entre 2 y 10 días.");
+      const starts = [...new Set([...(prev.cycle?.starts || []), lastStart])].sort();
+      cycle = { mode, starts, cycleLength: Math.round(cl), periodLength: Math.round(pl), regular: String(f.get("regular") || "") };
+    } else cycle = { ...(prev.cycle || {}), mode };
+  }
+  pat.profile = { ...prev, greetName: isNew ? "" : String(f.get("greetName") || "").trim(), birthDate, gender, sex, heightCm,
+    race: String(f.get("race") || "") || null, cycle, answered: true };
+  await savePatient(pat);
+  if (isNew) { state.patients.push(pat); state.patientId = pat.id; localStorage.setItem("patientId", pat.id); }
+  if (kg !== null) {
+    const last = (await (async () => state.weights.filter((w) => w.patientId === pat.id).sort((a, b) => a.date.localeCompare(b.date)).slice(-1)[0])());
+    if (!last || last.kg !== kg) await saveWeight(pat, { date: todayIso(), kg });
+  }
+  state.view = null; state.tab = "analisis";
+  await load(); render();
+}
+
+const profileNudge = () => {
+  const p = patient();
+  return p && !p.profile?.answered ? `<div class="card"><div class="small">Responde el cuestionario inicial para calcular el IMC, la composición corporal y, si lo deseas, el calendario menstrual.</div><button class="link" data-action="profile">Abrir cuestionario</button></div>` : "";
+};
+
+const dateLong = (iso) => new Date(iso + "T12:00:00").toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" });
+
+function viewCiclo() {
+  const pat = patient();
+  const cy = pat?.profile?.cycle;
+  let html = `${header("Ciclo")}<main>`;
+  if (!cy || !["natural", "hormonal"].includes(cy.mode)) return html + `<div class="empty"><p>El calendario menstrual no está activado.</p><button class="primary" data-action="profile">Activar en el perfil</button></div></main>`;
+  if (cy.mode === "hormonal") return html + `<div class="card"><strong>Anticonceptivo hormonal</strong><p class="small">Con anticonceptivos hormonales no hay un ciclo natural con ovulación, por eso no se calculan fases. Puedes cambiar esta opción en el perfil.</p><button class="link" data-action="profile">Editar perfil</button></div></main>`;
+  const today = todayIso();
+  const now = phaseOn(cy, today);
+  if (!now) return html + `<div class="empty"><p>Falta la fecha de tu última regla.</p><button class="primary" data-action="periodStart">Registrar inicio de regla</button></div></main>`;
+  const ph = PHASES[now.phase];
+  html += `<div class="card cyc"><div class="muted small">Hoy · ${esc(dateLong(today))}</div>
+    <div class="phase" style="--c:${ph.color}">Fase ${esc(ph.name.toLowerCase())}</div>
+    <div class="big">Día ${now.day}<span class="of"> de ${now.length}</span></div>
+    <p class="small">${esc(ph.text)}</p>
+    <ul class="facts"><li>Próxima regla estimada: <strong>${esc(dateLong(now.nextStart))}</strong> (${now.daysToNext === 1 ? "mañana" : `en ${now.daysToNext} días`})</li>
+    <li>Ovulación estimada: <strong>${esc(dateLong(now.ovulation))}</strong></li>
+    <li>Ventana fértil estimada: <strong>${esc(fmtDate(now.fertile.from))} al ${esc(fmtDate(now.fertile.to))}</strong>${now.inFertileWindow ? " · estás dentro de ella" : ""}</li></ul>
+    ${now.projected ? `<p class="small muted">Estimación proyectada: no hay un registro de regla reciente. Registra el inicio de tu última regla para afinar el cálculo.</p>` : ""}
+    ${now.irregular ? `<p class="small muted">Como tus ciclos no son regulares, las fechas pueden variar varios días.</p>` : ""}
+    <button class="primary wide" data-action="periodStart">Registrar inicio de regla</button></div>`;
+  const cm = state.calMonth || { y: new Date().getFullYear(), m: new Date().getMonth() };
+  const title = new Date(cm.y, cm.m, 1).toLocaleDateString("es-MX", { month: "long" }) + " de " + cm.y;
+  const starts = new Set(cy.starts || []);
+  html += `<div class="card"><div class="calhead"><button class="icon" data-action="calPrev" aria-label="Mes anterior">‹</button><strong>${esc(title)}</strong><button class="icon" data-action="calNext" aria-label="Mes siguiente">›</button></div>
+    <div class="cal">${["L", "M", "M", "J", "V", "S", "D"].map((d) => `<span class="dow">${d}</span>`).join("")}` +
+    monthGrid(cm.y, cm.m, cy).map((c) => {
+      if (!c) return `<span></span>`;
+      const i = c.info, col = i ? PHASES[i.phase].color : "transparent";
+      return `<span class="day${c.date === today ? " today" : ""}${i?.inFertileWindow ? " fertile" : ""}${starts.has(c.date) ? " start" : ""}" style="--c:${col}" title="${i ? esc(PHASES[i.phase].name) : ""}">${c.d}</span>`;
+    }).join("") + `</div>
+    <div class="legend">${Object.values(PHASES).map((p) => `<span><i style="background:${p.color}"></i>${esc(p.name)}</span>`).join("")}<span><i class="ring"></i>Ventana fértil</span><span><i class="dot"></i>Inicio de regla</span></div></div>`;
+  const hist = [...(cy.starts || [])].sort().reverse().slice(0, 8);
+  html += `<h2>Inicios de regla registrados</h2><ul class="list">${hist.map((d) => `<li class="row static"><span class="grow"><span class="name">${esc(fmtDate(d))}</span></span><button class="icon danger" data-action="delStart" data-date="${d}" aria-label="Borrar">✕</button></li>`).join("")}</ul>
+    <p class="small muted">Ciclo promedio usado: ${cycleLength(cy)} días. Las fases son estimaciones basadas en un ciclo típico; no sustituyen la valoración médica ni sirven como método anticonceptivo.</p></main>`;
+  return html;
+}
+
+function registerPeriod() {
+  const pat = patient();
+  showForm({ title: "Inicio de regla", intro: "Indica el primer día de sangrado.",
+    fields: [{ name: "d", label: "Fecha", type: "date", value: todayIso(), max: todayIso() }], okLabel: "Guardar",
+    onSubmit: async ({ d }) => {
+      if (!d || d > todayIso()) return "Escribe una fecha válida.";
+      const cy = pat.profile.cycle;
+      pat.profile = { ...pat.profile, cycle: { ...cy, starts: [...new Set([...(cy.starts || []), d])].sort() } };
+      await savePatient(pat); await load(); render();
+    } });
+}
+async function removePeriod(date) {
+  const pat = patient(), cy = pat.profile.cycle;
+  pat.profile = { ...pat.profile, cycle: { ...cy, starts: (cy.starts || []).filter((x) => x !== date) } };
+  await savePatient(pat); await load(); render();
+}
+
+const greeting = () => {
+  const p = patient();
+  const n = (p?.profile?.greetName || p?.name || "").trim();
+  return n ? `¡Bienvenido ${n}!` : "¡Bienvenido!";
+};
+
+/** Agrupa filas por tipo de estudio o por sistema u órgano, según la preferencia elegida. */
+function groupRows(rows) {
+  const byName = (a, b) => a.name.localeCompare(b.name, "es");
+  if (state.groupBy === "system") {
+    return SYSTEM_NAMES.map((g) => [`${systemIcon(g)} ${g}`, rows.filter((s) => systemOf(s.name, s.category) === g).sort(byName)]).filter(([, r]) => r.length);
+  }
+  return CATEGORIES.map((c) => [c, rows.filter((s) => s.category === c).sort(byName)]).filter(([, r]) => r.length);
+}
+const groupToggle = () => `<div class="seg" role="group" aria-label="Agrupar por"><span class="muted small">Agrupar por</span>
+  <button data-action="groupBy" data-mode="study" class="${state.groupBy === "study" ? "on" : ""}">Estudio</button>
+  <button data-action="groupBy" data-mode="system" class="${state.groupBy === "system" ? "on" : ""}">Sistema u órgano</button></div>`;
+
 function viewAnalisis() {
   const reports = myReports();
-  if (!reports.length) return `${header("Análisis")}<main><div class="empty"><p>Todavía no hay análisis.</p><p class="muted">Importa un PDF de laboratorio y los resultados se leen automáticamente.</p><button class="primary" data-action="import">Importar PDF</button></div></main>`;
+  if (!reports.length) return `${header("Análisis")}<main><h2 class="hello">${esc(greeting())}</h2>${profileNudge()}<div class="empty"><p>Todavía no hay análisis.</p><p class="muted">Importa un PDF de laboratorio y los resultados se leen automáticamente.</p><button class="primary" data-action="import">Importar PDF</button></div></main>`;
   const all = buildSeries();
   const flagged = all.filter((s) => s.points[s.points.length - 1].status !== "normal").length;
   const q = state.search.trim().toLowerCase();
   const list = all.filter((s) => (!q || s.name.toLowerCase().includes(q)) && (!state.onlyOut || s.points[s.points.length - 1].status !== "normal"));
   let html = `${header(patient().name)}<main>
+    <h2 class="hello">${esc(greeting())}</h2>${profileNudge()}
     <div class="card summary">${reports.length} informe${reports.length === 1 ? "" : "s"} · <strong>${flagged}</strong> de ${all.length} parámetros fuera de rango en su último valor</div>
-    <div class="tools"><input id="search" type="search" placeholder="Buscar parámetro" value="${esc(state.search)}"><label class="check"><input type="checkbox" id="onlyOut" ${state.onlyOut ? "checked" : ""}> Solo fuera de rango</label></div>`;
-  for (const cat of CATEGORIES) {
-    const rows = list.filter((s) => s.category === cat).sort((a, b) => a.name.localeCompare(b.name, "es"));
-    if (!rows.length) continue;
+    <div class="tools"><input id="search" type="search" placeholder="Buscar parámetro" value="${esc(state.search)}"><label class="check"><input type="checkbox" id="onlyOut" ${state.onlyOut ? "checked" : ""}> Solo fuera de rango</label></div>${groupToggle()}`;
+  for (const [cat, rows] of groupRows(list)) {
     html += `<h2>${cat}</h2><ul class="list">` + rows.map((s) => {
       const last = s.points[s.points.length - 1];
       const nums = s.points.filter((p) => p.value !== null).map((p) => ({ t: p.t, v: p.value }));
@@ -208,24 +424,101 @@ function viewAnalyte(key) {
   return html;
 }
 
+function viewHistorico() {
+  const reports = myReports();
+  if (!reports.length) return `${header("Histórico")}<main><h2 class="hello">${esc(greeting())}</h2><div class="empty"><p>Todavía no hay análisis.</p><p class="muted">Cuando importes informes aparecerá aquí cada indicador a lo largo del tiempo.</p><button class="primary" data-action="import">Importar PDF</button></div></main>`;
+  const all = buildSeries();
+  const q = state.histSearch.trim().toLowerCase();
+  const cols = [...reports].sort((a, b) => a.date.localeCompare(b.date));
+  const list = all.filter((s) => (!q || s.name.toLowerCase().includes(q)) && (!state.histOnlyOut || s.points.some((p) => p.status !== "normal")));
+  let html = `${header("Histórico")}<main>
+    <div class="tools"><input id="histSearch" type="search" placeholder="Buscar indicador" value="${esc(state.histSearch)}"><label class="check"><input type="checkbox" id="histOnlyOut" ${state.histOnlyOut ? "checked" : ""}> Con algún valor fuera de rango</label></div>${groupToggle()}
+    <p class="muted small">${all.length} indicadores en ${cols.length} informe${cols.length === 1 ? "" : "s"}. Toca un indicador para ver su gráfica.</p>`;
+  for (const [cat, rows] of groupRows(list)) {
+    html += `<h2>${cat}</h2><div class="histwrap"><table class="hist"><thead><tr><th class="sticky">Indicador</th>${cols.map((r) => `<th>${fmtDate(r.date)}</th>`).join("")}</tr></thead><tbody>` +
+      rows.map((s) => {
+        const byRid = new Map(s.points.map((pt) => [pt.rid, pt]));
+        const unit = s.points[s.points.length - 1].unit;
+        return `<tr><th class="sticky"><button data-action="analyte" data-key="${esc(s.key)}">${esc(s.name)}<small>${esc(unit)}</small></button></th>` +
+          cols.map((r) => { const pt = byRid.get(r.id); return pt ? `<td class="st-${pt.status}" title="Referencia: ${esc(reference(pt))}">${esc(display(pt))}</td>` : `<td class="none">–</td>`; }).join("") + "</tr>";
+      }).join("") + "</tbody></table></div>";
+  }
+  if (!list.length) html += `<p class="muted center">Sin resultados para ese filtro.</p>`;
+  html += `<button class="link wide" data-action="exportCsv">Exportar histórico (CSV)</button>`;
+  return html + "</main>";
+}
+
+async function exportCsv() {
+  const p = patient();
+  const all = buildSeries();
+  const cols = [...myReports()].sort((a, b) => a.date.localeCompare(b.date));
+  const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = [["Categoría", "Sistema u órgano", "Indicador", "Unidad", ...cols.map((r) => r.date)].map(q).join(",")];
+  for (const cat of CATEGORIES) for (const s of all.filter((x) => x.category === cat)) {
+    const by = new Map(s.points.map((pt) => [pt.rid, pt]));
+    lines.push([cat, systemOf(s.name, s.category), s.name, s.points[s.points.length - 1].unit, ...cols.map((r) => { const pt = by.get(r.id); return pt ? display(pt) : ""; })].map(q).join(","));
+  }
+  const name = `historico-${todayIso()}.csv`;
+  const file = new File(["\ufeff" + lines.join("\r\n")], name, { type: "text/csv" });
+  const go = async () => {
+    try { if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; } }
+    catch (e) { if (e.name === "AbortError") return; }
+    const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  };
+  if (p?.protection) showDialog("Archivo sin cifrar", "El CSV no está protegido con contraseña. Guárdalo en un lugar seguro.", [{ label: "Cancelar" }, { label: "Exportar", onClick: go }]);
+  else go();
+}
+
+const LEVEL_TEXT = { normal: "Dentro de rangos", fuera: "Atención moderada", alto: "Atención", "sin datos": "Sin datos" };
+const dash = (v, unit = "") => (v == null ? "–" : `${fmt(v)}${unit}`);
+
+function compositionCard(w, prof) {
+  const c = compose(w, prof);
+  const line = (name, item, unit) => item ? `<li class="row static"><span class="grow"><span class="name">${name}</span>${item.range ? `<span class="sub">Referencia: ${esc(item.range)}</span>` : ""}</span><span class="val"><strong>${esc(fmt(item.value))}${unit}</strong>${item.status ? `<span class="badge st-${item.status}">${esc(item.label)}</span>` : ""}</span></li>` : "";
+  let html = `<div class="card comp"><div class="muted small">Composición corporal · ${fmtDate(w.date)}</div>
+    <div class="compHead st-${c.level === "sin datos" ? "normal" : c.level}">${esc(c.headline)}</div>
+    <ul class="list">${line("IMC", c.bmi, "")}${line("Grasa corporal", c.fat, " %")}${line("Agua corporal", c.water, " %")}${line("Masa ósea", c.bone, " kg")}</ul>`;
+  if (c.fat) html += `<p class="small">Masa grasa: <strong>${fmt(c.fatMassKg)} kg</strong> · Masa magra: <strong>${fmt(c.leanMassKg)} kg</strong>${c.waterKg ? ` · Agua: <strong>${fmt(c.waterKg)} kg</strong>` : ""}</p>`;
+  if (c.paragraphs.length) html += `<p class="small">${c.paragraphs.map(esc).join(" ")}</p>`;
+  if (c.missing.length) html += `<p class="small muted">Para una evaluación completa agrega ${esc(c.missing.join(", "))} en el perfil.</p><button class="link" data-action="profile">Completar perfil</button>`;
+  html += `<p class="muted small">Referencias: IMC de la OMS para adultos; grasa de Gallagher y colaboradores (2000); agua y masa ósea de guías de básculas de bioimpedancia. Las mediciones por bioimpedancia son estimaciones y varían con la hidratación. Esta lectura es informativa y no sustituye la valoración de un profesional de la salud.</p></div>`;
+  return html;
+}
+
 function viewPeso() {
   const ws = myWeights();
+  const pat = patient();
   const kg = (v) => `${fmt(Number(v.toFixed(1)))} kg`;
   const delta = (v) => `${v > 0 ? "+" : ""}${fmt(Number(v.toFixed(1)))} kg`;
+  if (!pat) return `${header("Peso")}<main><div class="empty"><p>Primero crea un paciente o importa un PDF.</p><button class="primary" data-action="newPatient">Nuevo paciente</button></div></main>`;
+  const prof = pat.profile || {};
   let html = `${header("Peso")}<main>`;
-  if (!patient()) return `${header("Peso")}<main><div class="empty"><p>Primero crea un paciente o importa un PDF.</p><button class="primary" data-action="newPatient">Nuevo paciente</button></div></main>`;
+  if (!prof.heightCm || !prof.sex || !prof.birthDate) html += `<div class="card"><div class="small">Completa la altura, el sexo y la fecha de nacimiento para calcular el IMC y evaluar la composición corporal.</div><button class="link" data-action="profile">Completar perfil</button></div>`;
   html += `<form id="weightForm" class="card form"><div class="grid2"><label>Fecha<input type="date" name="date" value="${todayIso()}" max="${todayIso()}" required></label>
     <label>Peso (kg)<input name="kg" inputmode="decimal" placeholder="70.5" required></label></div>
-    <label>Nota (opcional)<input name="note" maxlength="80"></label><button class="primary" type="submit">Guardar peso</button></form>`;
+    <div class="grid3"><label>% grasa<input name="fatPct" inputmode="decimal" placeholder="opcional"></label>
+    <label>% agua<input name="waterPct" inputmode="decimal" placeholder="opcional"></label>
+    <label>Huesos (kg)<input name="boneKg" inputmode="decimal" placeholder="opcional"></label></div>
+    <label>Nota (opcional)<input name="note" maxlength="80"></label><button class="primary" type="submit">Guardar</button></form>`;
   if (ws.length) {
     const last = ws[ws.length - 1];
-    html += `<div class="card"><div class="big">${kg(last.kg)}</div><div class="muted small">Último registro: ${fmtDate(last.date)}</div>`;
-    if (ws.length > 1) {
-      html += `<div class="small">Frente al registro anterior: <strong>${delta(last.kg - ws[ws.length - 2].kg)}</strong></div><div class="small">Desde el primer registro (${fmtDate(ws[0].date)}): <strong>${delta(last.kg - ws[0].kg)}</strong></div>`;
-    }
+    const lastBmi = calcBmi(last.kg, prof.heightCm);
+    html += `<div class="card"><div class="big">${kg(last.kg)}</div><div class="muted small">Último registro: ${fmtDate(last.date)}</div>${lastBmi ? `<div class="small">IMC: <strong>${fmt(Number(lastBmi.toFixed(1)))}</strong></div>` : ""}`;
+    if (ws.length > 1) html += `<div class="small">Frente al registro anterior: <strong>${delta(last.kg - ws[ws.length - 2].kg)}</strong></div><div class="small">Desde el primer registro (${fmtDate(ws[0].date)}): <strong>${delta(last.kg - ws[0].kg)}</strong></div>`;
     html += "</div>";
-    if (ws.length > 1) html += `<div class="card"><div class="muted small">Evolución (kg)</div>${lineChart({ points: ws.map((w) => ({ t: toTime(w.date), v: w.kg, status: "normal" })), label: "Evolución del peso" })}</div>`;
-    html += `<h2>Registros</h2><ul class="list">` + [...ws].reverse().map((w) => `<li class="row static"><span class="grow"><span class="name">${fmtDate(w.date)}</span>${w.note ? `<span class="sub">${esc(w.note)}</span>` : ""}</span><strong>${kg(w.kg)}</strong><button class="icon danger" data-action="delWeight" data-id="${w.id}" aria-label="Borrar">✕</button></li>`).join("") + "</ul>";
+    const comp = [...ws].reverse().find((w) => w.fatPct != null || w.waterPct != null || w.boneKg != null);
+    html += compositionCard(comp || last, prof);
+    const chart = (title, pts, label) => pts.length > 1 ? `<div class="card"><div class="muted small">${title}</div>${lineChart({ points: pts, label })}</div>` : "";
+    html += chart("Evolución del peso (kg)", ws.map((w) => ({ t: toTime(w.date), v: w.kg, status: "normal" })), "Evolución del peso");
+    if (prof.heightCm) html += chart("Evolución del IMC", ws.map((w) => ({ t: toTime(w.date), v: Number(calcBmi(w.kg, prof.heightCm).toFixed(1)), status: "normal" })), "Evolución del IMC");
+    html += chart("Evolución de la grasa corporal (%)", ws.filter((w) => w.fatPct != null).map((w) => ({ t: toTime(w.date), v: w.fatPct, status: "normal" })), "Evolución de la grasa");
+    html += chart("Evolución del agua corporal (%)", ws.filter((w) => w.waterPct != null).map((w) => ({ t: toTime(w.date), v: w.waterPct, status: "normal" })), "Evolución del agua");
+    html += chart("Evolución de la masa ósea (kg)", ws.filter((w) => w.boneKg != null).map((w) => ({ t: toTime(w.date), v: w.boneKg, status: "normal" })), "Evolución de la masa ósea");
+    html += `<h2>Registros</h2><ul class="list">` + [...ws].reverse().map((w) => {
+      const extra = [w.fatPct != null ? `grasa ${fmt(w.fatPct)} %` : "", w.waterPct != null ? `agua ${fmt(w.waterPct)} %` : "", w.boneKg != null ? `huesos ${fmt(w.boneKg)} kg` : "", w.note || ""].filter(Boolean).join(" · ");
+      return `<li class="row static"><span class="grow"><span class="name">${fmtDate(w.date)}</span>${extra ? `<span class="sub">${esc(extra)}</span>` : ""}</span><strong>${kg(w.kg)}</strong><button class="icon danger" data-action="delWeight" data-id="${w.id}" aria-label="Borrar">✕</button></li>`;
+    }).join("") + "</ul>";
   } else html += `<p class="muted center">Sin registros de peso todavía.</p>`;
   return html + "</main>";
 }
@@ -257,7 +550,9 @@ function viewReport(id) {
 }
 
 function nav() {
-  const tabs = [["analisis", "Análisis", "🩸"], ["peso", "Peso", "⚖️"], ["informes", "Informes", "📄"]];
+  const tabs = [["analisis", "Análisis", "🩸"], ["historico", "Histórico", "🗂️"], ["peso", "Peso", "⚖️"]];
+  if (["natural", "hormonal"].includes(patient()?.profile?.cycle?.mode)) tabs.push(["ciclo", "Ciclo", "🌙"]);
+  tabs.push(["informes", "Informes", "📄"]);
   return `<nav class="tabs">${tabs.map(([k, l, i]) => `<button data-action="tab" data-tab="${k}" class="${state.tab === k && !state.view ? "active" : ""}"><span>${i}</span>${l}</button>`).join("")}</nav>`;
 }
 
@@ -270,9 +565,10 @@ function render() {
   if (locked) html = viewLocked(cur);
   else if (state.view?.type === "analyte") html = viewAnalyte(state.view.key);
   else if (state.view?.type === "report") html = viewReport(state.view.id);
-  else if (!state.patients.length && state.tab !== "informes") html = `${header("Seguimiento médico")}<main><div class="empty"><div class="logo">🩸</div><p><strong>Seguimiento médico</strong></p><p class="muted">Importa un PDF de análisis de sangre y la aplicación lee los resultados automáticamente. El peso se captura a mano. Todo se queda en este dispositivo.</p><button class="primary" data-action="import">Importar PDF</button><button class="link" data-action="newPatient">Crear paciente sin PDF</button></div></main>`;
-  else html = state.tab === "peso" ? viewPeso() : state.tab === "informes" ? viewInformes() : viewAnalisis();
-  app.innerHTML = html + (locked ? "" : nav()) + (state.busy ? `<div class="busy"><div class="spinner"></div>Leyendo PDF…</div>` : "");
+  else if (state.view?.type === "profile") html = viewProfile(false);
+  else if (!state.patients.length) html = viewProfile(true);
+  else html = state.tab === "peso" ? viewPeso() : state.tab === "ciclo" ? viewCiclo() : state.tab === "historico" ? viewHistorico() : state.tab === "informes" ? viewInformes() : viewAnalisis();
+  app.innerHTML = html + (locked || !state.patients.length ? "" : nav()) + (state.busy ? `<div class="busy"><div class="spinner"></div>Leyendo PDF…</div>` : "");
   if (state.view) window.scrollTo(0, 0); else window.scrollTo(0, keepScroll);
 }
 
@@ -309,6 +605,7 @@ function showMenu() {
     : `<button data-menu="lock">Bloquear ahora</button><button data-menu="changePw">Cambiar contraseña</button><button data-menu="removePw">Quitar contraseña</button>`;
   showDialog("Menú", `<div class="menu">
       <button data-menu="newPatient">Nuevo paciente</button>
+      ${p ? `<button data-menu="profile">Perfil del paciente (nombre, altura, sexo, nacimiento)</button>` : ""}
       ${protect}
       ${p ? `<button data-menu="delPatient" class="danger-text">Borrar paciente «${esc(p.name)}» y sus datos</button>` : ""}
       <button data-menu="export">Exportar copia de respaldo</button>
@@ -330,7 +627,9 @@ function showForm({ title, intro = "", fields, okLabel, onSubmit }) {
   const d = document.createElement("dialog");
   d.id = "dlg";
   d.innerHTML = `<h3>${esc(title)}</h3><form class="form" autocomplete="off">${intro ? `<p class="small muted">${intro}</p>` : ""}
-    ${fields.map((f) => `<label>${esc(f.label)}<input name="${f.name}" type="password" autocomplete="${f.autocomplete || "off"}" required></label>`).join("")}
+    ${fields.map((f) => f.type === "select"
+      ? `<label>${esc(f.label)}<select name="${f.name}">${f.options.map(([v, l]) => `<option value="${v}" ${v === (f.value ?? "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>`
+      : `<label>${esc(f.label)}<input name="${f.name}" type="${f.type || "password"}" value="${esc(f.value ?? "")}" ${f.inputmode ? `inputmode="${f.inputmode}"` : ""} ${f.max ? `max="${f.max}"` : ""} autocomplete="${f.autocomplete || "off"}" ${f.optional ? "" : "required"}></label>`).join("")}
     <div class="err" id="formErr"></div>
     <div class="dlgactions"><button type="button" data-cancel>Cancelar</button><button type="submit" class="primary">${esc(okLabel)}</button></div></form>`;
   document.body.appendChild(d);
@@ -376,7 +675,11 @@ const NO_RECOVERY = "<strong>No hay forma de recuperarla.</strong> Si la olvidas
 /** Vuelve a guardar todos los datos del paciente con una clave nueva (o sin cifrar) en una sola transacción. */
 async function reencrypt(pat, newKey, newMeta) {
   const updated = { ...pat };
-  if (newMeta) updated.protection = newMeta; else delete updated.protection;
+  const profile = { ...(pat.profile || {}) };
+  if (pat.birthDate && !profile.birthDate) profile.birthDate = pat.birthDate;   // la fecha de nacimiento antigua pasa al perfil
+  delete updated.birthDate;
+  if (newMeta) { updated.protection = newMeta; updated.profileEnc = await encryptJSON(newKey, profile); delete updated.profile; }
+  else { delete updated.protection; delete updated.profileEnc; updated.profile = profile; }
   const reports = [], weights = [];
   for (const r of state.reports.filter((x) => x.patientId === pat.id)) reports.push(await encodeRecord(updated, r, REPORT_FIELDS, newKey));
   for (const w of state.weights.filter((x) => x.patientId === pat.id)) weights.push(await encodeRecord(updated, w, WEIGHT_FIELDS, newKey));
@@ -427,6 +730,7 @@ function lockAll() {
 async function menuAction(kind) {
   const p = patient();
   if (kind === "newPatient") return newPatient();
+  if (kind === "profile") { state.view = { type: "profile" }; return render(); }
   if (kind === "protect") return protectPatient(p, "set");
   if (kind === "changePw") return protectPatient(p, "change");
   if (kind === "removePw") return removeProtection(p);
@@ -443,8 +747,8 @@ function newPatient() {
   askText("Nuevo paciente", "Nombre completo", async (v) => {
     const name = (v || "").trim();
     if (!name) return;
-    const p = { name, nameKey: makeKey(name), birthDate: null };
-    p.id = await db.put("patients", p);
+    const p = { name, nameKey: makeKey(name), profile: {} };
+    await savePatient(p);
     state.patientId = p.id; localStorage.setItem("patientId", p.id);
     await load(); render();
   });
@@ -472,6 +776,12 @@ document.addEventListener("click", async (e) => {
   else if (a === "analyte") { state.view = { type: "analyte", key: el.dataset.key }; render(); }
   else if (a === "report") { state.view = { type: "report", id: Number(el.dataset.id) }; render(); }
   else if (a === "import") document.getElementById("pdfInput").click();
+  else if (a === "profile") { state.view = { type: "profile" }; render(); }
+  else if (a === "calPrev" || a === "calNext") { const m = state.calMonth || { y: new Date().getFullYear(), m: new Date().getMonth() }; const d = new Date(m.y, m.m + (a === "calNext" ? 1 : -1), 1); state.calMonth = { y: d.getFullYear(), m: d.getMonth() }; render(); }
+  else if (a === "periodStart") registerPeriod();
+  else if (a === "delStart") removePeriod(el.dataset.date);
+  else if (a === "groupBy") { state.groupBy = el.dataset.mode; localStorage.setItem("groupBy", state.groupBy); render(); }
+  else if (a === "exportCsv") exportCsv();
   else if (a === "menu") showMenu();
   else if (a === "newPatient") newPatient();
   else if (a === "delWeight") { await db.del("weights", Number(el.dataset.id)); await load(); render(); }
@@ -484,8 +794,16 @@ document.addEventListener("click", async (e) => {
 
 document.addEventListener("change", async (e) => {
   const t = e.target;
-  if (t.id === "patientSelect") { state.patientId = Number(t.value); localStorage.setItem("patientId", t.value); state.view = null; render(); }
+  if (t.id === "qGender" || t.id === "qCycleOn" || t.id === "qCycleMode") {
+    const g = document.getElementById("qGender").value, on = document.getElementById("qCycleOn").checked, mode = document.getElementById("qCycleMode").value;
+    document.getElementById("sexRow").hidden = !(g === "X" || g === "N");
+    document.getElementById("cycleRow").hidden = g === "M";
+    document.getElementById("cycleBlock").hidden = !(on && g !== "M");
+    document.getElementById("naturalFields").hidden = mode !== "natural";
+    document.getElementById("hormNote").hidden = mode !== "hormonal";
+  } else if (t.id === "patientSelect") { state.patientId = Number(t.value); localStorage.setItem("patientId", t.value); state.view = null; render(); }
   else if (t.id === "onlyOut") { state.onlyOut = t.checked; render(); }
+  else if (t.id === "histOnlyOut") { state.histOnlyOut = t.checked; render(); }
   else if (t.id === "pdfInput") { const files = [...t.files]; t.value = ""; if (files.length) importFiles(files); }
   else if (t.id === "backupInput") {
     const f = t.files[0]; t.value = "";
@@ -503,11 +821,13 @@ document.addEventListener("change", async (e) => {
 });
 
 document.addEventListener("input", (e) => {
-  if (e.target.id === "search") {
-    state.search = e.target.value;
+  const id = e.target.id;
+  if (id === "qBirth") { document.getElementById("qAge").textContent = ageText(e.target.value); return; }
+  if (id === "search" || id === "histSearch") {
+    state[id === "search" ? "search" : "histSearch"] = e.target.value;
     const pos = e.target.selectionStart;
     render();
-    const s = document.getElementById("search"); s.focus(); s.setSelectionRange(pos, pos);
+    const s = document.getElementById(id); s.focus(); s.setSelectionRange(pos, pos);
   }
 });
 
@@ -524,12 +844,21 @@ document.addEventListener("submit", async (e) => {
     render();
     return;
   }
+  if (e.target.id === "profileForm") { e.preventDefault(); await submitProfile(e.target); return; }
   if (e.target.id !== "weightForm") return;
   e.preventDefault();
   const f = new FormData(e.target);
-  const kg = parseFloat(String(f.get("kg")).replace(",", "."));
+  const num = (name) => { const raw = String(f.get(name) || "").trim().replace(",", "."); return raw === "" ? null : parseFloat(raw); };
+  const kg = num("kg"), fatPct = num("fatPct"), waterPct = num("waterPct"), boneKg = num("boneKg");
   if (!(kg >= 20 && kg <= 400)) { showDialog("Peso no válido", "Escribe un peso entre 20 y 400 kg."); return; }
-  await saveWeight(patient(), { date: f.get("date"), kg, note: String(f.get("note") || "") });
+  if (fatPct !== null && !(fatPct >= 3 && fatPct <= 70)) { showDialog("% de grasa no válido", "Escribe un valor entre 3 y 70."); return; }
+  if (waterPct !== null && !(waterPct >= 20 && waterPct <= 80)) { showDialog("% de agua no válido", "Escribe un valor entre 20 y 80."); return; }
+  if (boneKg !== null && !(boneKg >= 0.5 && boneKg <= 8)) { showDialog("Masa ósea no válida", "Escribe un valor entre 0.5 y 8 kg."); return; }
+  const rec = { date: f.get("date"), kg, note: String(f.get("note") || "") };
+  if (fatPct !== null) rec.fatPct = fatPct;
+  if (waterPct !== null) rec.waterPct = waterPct;
+  if (boneKg !== null) rec.boneKg = boneKg;
+  await saveWeight(patient(), rec);
   await load(); render();
 });
 

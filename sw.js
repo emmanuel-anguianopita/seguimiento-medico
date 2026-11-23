@@ -1,8 +1,8 @@
 // Service worker: guarda la aplicación completa para que funcione sin conexión y sin depender de ningún servidor.
-const CACHE = "seguimiento-medico-v2";
+const CACHE = "seguimiento-medico-v6";
 const ASSETS = [
   "./", "./index.html", "./manifest.webmanifest", "./css/app.css",
-  "./js/app.js", "./js/crypto.js", "./js/parser.js", "./js/pdftext.js", "./js/db.js", "./js/charts.js",
+  "./js/app.js", "./js/crypto.js", "./js/parser.js", "./js/composition.js", "./js/systems.js", "./js/cycle.js", "./js/pdftext.js", "./js/db.js", "./js/charts.js",
   "./vendor/pdf.min.mjs", "./vendor/pdf.worker.min.mjs",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png",
 ];
