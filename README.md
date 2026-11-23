@@ -1,2 +1,0 @@
-# seguimiento-medico
-
