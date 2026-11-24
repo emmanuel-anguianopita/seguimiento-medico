@@ -278,7 +278,7 @@ function viewPortal() {
       <select name="pid" aria-label="Paciente" required><option value="" disabled selected>${list && !list.length ? "Sin pacientes disponibles" : "Selecciona tu nombre"}</option>${opts}</select>
       <input type="password" name="pw" placeholder="Contraseña" autocomplete="current-password" aria-label="Contraseña" required>
       <button class="primary" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? "Verificando…" : "Entrar"}</button>
-      <div class="err" id="portalErr">${esc(state.portalError || msg)}</div></form><div class="gate-ver">Versión 15</div></div></main>`;
+      <div class="err" id="portalErr">${esc(state.portalError || msg)}</div></form><div class="gate-ver">Versión 16</div></div></main>`;
 }
 
 async function loadPortalList() {
@@ -890,6 +890,7 @@ function showMenu() {
       <button data-menu="export">Exportar copia de respaldo</button>
       <button data-menu="backup">Importar copia de respaldo</button>
       <p class="muted small">Los datos se guardan solo en este dispositivo. Los pacientes con contraseña se guardan cifrados, también en la copia de respaldo. Haz copias con regularidad, sobre todo antes de cambiar de teléfono.</p>
+    <p class="muted small center">Versión 16</p>
     </div>`);
   document.querySelector("#dlg .menu").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-menu]");
