@@ -138,3 +138,18 @@ Al publicar, `pacientes.json` suma a los pacientes que ya están en la lista pub
 - **Quitar de la lista / Volver a la lista**, y **Descargar pacientes.json actualizado** para reemplazar ese archivo sin editarlo a mano.
 - La contraseña de cada paciente se guarda solo en este dispositivo a partir de la primera publicación con esta versión; nunca se incluye en lo que se publica. Los pacientes publicados antes aparecen como «no registrada»: asígnales una nueva contraseña. Tu copia de respaldo también incluirá estas contraseñas, así que guárdala con cuidado.
 - Los pacientes publicados desde otro dispositivo aparecen en la lista, pero sin datos: para administrarlos, importa aquí sus PDF y publícalos de nuevo.
+
+# Resumen histórico en PDF (versión 18)
+
+Genera un PDF horizontal tamaño carta con el histórico completo del paciente. No usa librerías externas: el PDF se arma en el navegador (`js/pdfwriter.js` y `js/resumen.js`).
+
+**Contenido:** avance general (porcentaje de indicadores en rango, cambio frente al estudio anterior y gráfica por estudio), resumen por sistema u órgano, indicadores fuera de rango con su valor, referencia, cambio y gráfica de evolución, peso y composición corporal (valores, evaluación y gráficas), histórico completo por sistema u órgano (los 9 estudios más recientes en la tabla, con minigráfica de tendencia de todos) y la lista de estudios incluidos.
+
+**Dónde está:**
+- **Paciente:** menú ⋯, «Descargar resumen histórico (PDF)», o el botón al final de la pestaña Histórico.
+- **Administrador, desde lo publicado en `data`:** menú ⋯, «Pacientes y contraseñas», botón «Resumen en PDF». Lee `data/<código>.json` del sitio y lo descifra con la contraseña del paciente (la registrada, o la que escribas). **No depende de lo que haya en este dispositivo**, así que funciona desde otra computadora o después de limpiar el navegador, y también para pacientes de la lista que no están en este dispositivo.
+- **Administrador, datos del dispositivo:** botón al final de la pestaña Histórico.
+
+**Actualizar la aplicación sin tocar a los pacientes:** el paquete de la aplicación no incluye la carpeta `data`. Al actualizar copia solo los archivos de la aplicación (`index.html`, `sw.js`, `manifest.webmanifest`, y las carpetas `css`, `js`, `vendor`, `icons`) encima de los del repositorio. En Mac, si arrastras la carpeta completa y Finder pregunta, elige **Combinar** (no «Reemplazar»), porque reemplazar la carpeta borraría `data`. En GitHub Desktop revisa que en los cambios no aparezcan archivos de `data` como eliminados antes de hacer Commit.
+
+El PDF descargado no está protegido con contraseña: se guarda como cualquier archivo del dispositivo.

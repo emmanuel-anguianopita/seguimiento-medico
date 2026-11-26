@@ -9,6 +9,7 @@ import * as db from "./db.js";
 import { lineChart, sparkline, fmt } from "./charts.js";
 import { makeProtection, tryUnlock, encryptJSON, decryptJSON, encryptBytes, decryptBytes } from "./crypto.js";
 import { makeZip } from "./zip.js";
+import { buildResumenPdf } from "./resumen.js";
 
 const CATEGORIES = ["Hematología", "Química clínica", "Inmunología", "Orina", "Otros"];
 const STATUS = {
@@ -278,7 +279,7 @@ function viewPortal() {
       <select name="pid" aria-label="Paciente" required><option value="" disabled selected>${list && !list.length ? "Sin pacientes disponibles" : "Selecciona tu nombre"}</option>${opts}</select>
       <input type="password" name="pw" placeholder="Contraseña" autocomplete="current-password" aria-label="Contraseña" required>
       <button class="primary" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? "Verificando…" : "Entrar"}</button>
-      <div class="err" id="portalErr">${esc(state.portalError || msg)}</div></form><div class="gate-ver">Versión 17</div></div></main>`;
+      <div class="err" id="portalErr">${esc(state.portalError || msg)}</div></form><div class="gate-ver">Versión 18</div></div></main>`;
 }
 
 async function loadPortalList() {
@@ -426,6 +427,55 @@ function publishPatient(pat) {
       <p class="small muted">Repite este proceso cada vez que importes estudios nuevos, usando la misma contraseña.</p>`,
       [{ label: "Cerrar" }, { label: "Guardar archivo", onClick: deliverFile(file) }]);
   });
+}
+
+// ---- Resumen histórico en PDF ----
+/** Datos del paciente que se está viendo (los mismos que ya se descifraron para la pantalla). */
+function payloadDeEstado() {
+  const p = patient();
+  const { publishPw, ignored, ...profile } = p.profile || {};
+  return { name: p.name, profile, reports: state.reports.filter((r) => r.patientId === p.id), weights: state.weights.filter((w) => w.patientId === p.id) };
+}
+const slug = (t) => String(t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+/** Genera el PDF con los datos que devuelve getPayload() y ofrece guardarlo o compartirlo. */
+async function resumenPdf(getPayload, fileBase) {
+  showDialog("Generando resumen…", `<p class="small muted">Se está preparando el PDF con todo el histórico.</p>`, []);
+  try {
+    const payload = await getPayload();
+    const bytes = await buildResumenPdf(payload);
+    const name = `${fileBase}-${todayIso()}.pdf`;
+    const file = new File([bytes], name, { type: "application/pdf" });
+    const kb = Math.max(1, Math.round(bytes.length / 1024));
+    showDialog("Resumen listo", `<p><strong>${esc(name)}</strong> · ${kb} KB</p><p class="small muted">Incluye el avance general, los indicadores fuera de rango con su evolución, el peso y la composición corporal, y el histórico completo por sistema u órgano. El archivo no está protegido con contraseña: guárdalo en un lugar seguro.</p>`,
+      [{ label: "Cerrar" }, { label: "Guardar o compartir", kind: "primary", onClick: deliverFile(file) }]);
+  } catch (e) {
+    console.error(e);
+    const msg = e?.message === "contraseña" ? "La contraseña no es correcta."
+      : e?.message === "no encontrado" ? "No se encontró el archivo de ese paciente en la carpeta data. Revisa que esté publicado."
+      : e?.message === "Sin estudios ni registros de peso" ? "Todavía no hay estudios ni registros de peso para resumir."
+      : e instanceof TypeError ? "No hay conexión. Inténtalo de nuevo." : "No se pudo generar el PDF. Inténtalo de nuevo.";
+    showDialog("No se pudo generar el resumen", `<p>${esc(msg)}</p>`);
+  }
+}
+const resumenDesdeEstado = () => resumenPdf(async () => payloadDeEstado(), "resumen-historico");
+/** Lee y descifra lo publicado en data/<id>.json; así el resumen no depende de lo que haya en este dispositivo. */
+async function leerPublicado(id, pw) {
+  if (!/^[0-9a-f]{32}$/.test(id)) throw new Error("no encontrado");
+  const res = await fetch(`./data/${id}.json`, { cache: "no-store" });
+  if (!res.ok) throw new Error("no encontrado");
+  const opened = await openBundleWithKey(await res.json(), pw);
+  if (!opened) throw new Error("contraseña");
+  return opened.payload;
+}
+/** Desde administración: resumen de un paciente de la lista usando la carpeta data. Pide la contraseña si no está registrada. */
+function resumenDePublicado(id, label, knownPw) {
+  const go = (pw) => resumenPdf(async () => { const d = await leerPublicado(id, pw); return d; }, `resumen-${slug(label) || "paciente"}`);
+  if (knownPw) return go(knownPw);
+  const d = showForm({ title: "Resumen histórico en PDF", intro: `Se leen los resultados publicados de <strong>${esc(label)}</strong> en la carpeta <strong>data</strong> y se descifran aquí con su contraseña. No se sube ni se guarda nada.`,
+    fields: [{ name: "pw", label: "Contraseña del paciente", autocomplete: "current-password" }], okLabel: "Generar PDF",
+    onSubmit: async ({ pw }) => { try { await leerPublicado(id, pw); } catch (e) { return e.message === "contraseña" ? "La contraseña no es correcta." : e.message === "no encontrado" ? "No se encontró ese paciente en la carpeta data." : "No hay conexión. Inténtalo de nuevo."; } secret = pw; } });
+  let secret = null;
+  d.addEventListener("closed", (e) => { if (e.detail === true && secret) go(secret); });
 }
 
 const CHANGE = { mejoro: ["good", "Mejoró"], empeoro: ["bad", "Empeoró"], estable: ["flat", "Estable"], igual: ["flat", "Sin cambio"], nuevo: ["new", "Nuevo"] };
@@ -705,12 +755,12 @@ function viewAdmin() {
     html += `<div class="card adm"><strong>${esc(p.name)}</strong>
       <div class="small muted">${pub ? `En la lista como «${esc(pub.label)}»${pub.at ? " · publicado el " + esc(fmtDate(pub.at.slice(0, 10))) : ""}${inList ? "" : " · fuera de la lista"}` : "Sin publicar"}</div>
       <div class="small">Contraseña: ${lk ? "<em>desbloquea al paciente para verla</em>" : pw ? (open ? `<code>${esc(pw)}</code>` : "••••••••••••") : "<em>no registrada (asigna una nueva)</em>"}</div>
-      <div class="pdfbtns"><button class="mini" data-action="admOpen" data-id="${p.id}">Abrir</button>${pw ? `<button class="mini" data-action="admShow" data-id="${p.id}">${open ? "Ocultar" : "Mostrar"}</button><button class="mini" data-action="admCopy" data-id="${p.id}">Copiar</button>` : ""}${lk ? "" : `<button class="mini" data-action="admSet" data-id="${p.id}">Asignar o cambiar contraseña</button>`}${pub ? `<button class="mini" data-action="${inList ? "admUnlist" : "admRelist"}" data-pid="${pub.id}">${inList ? "Quitar de la lista" : "Volver a la lista"}</button>` : ""}</div></div>`;
+      <div class="pdfbtns"><button class="mini" data-action="admOpen" data-id="${p.id}">Abrir</button>${pw ? `<button class="mini" data-action="admShow" data-id="${p.id}">${open ? "Ocultar" : "Mostrar"}</button><button class="mini" data-action="admCopy" data-id="${p.id}">Copiar</button>` : ""}${lk ? "" : `<button class="mini" data-action="admSet" data-id="${p.id}">Asignar o cambiar contraseña</button>`}${pub || !lk ? `<button class="mini" data-action="admPdf" data-id="${p.id}">Resumen en PDF</button>` : ""}${pub ? `<button class="mini" data-action="${inList ? "admUnlist" : "admRelist"}" data-pid="${pub.id}">${inList ? "Quitar de la lista" : "Volver a la lista"}</button>` : ""}</div></div>`;
   }
   for (const x of live.filter((x) => !localPub.has(x.id))) {
     const out = ex.has(x.id);
     html += `<div class="card adm"><strong>${esc(x.label)}</strong><div class="small muted">Está en la lista publicada, pero sus datos no están en este dispositivo${out ? " · fuera de la lista" : ""}. Para cambiar su contraseña, importa de nuevo sus PDF aquí y publícalo.</div>
-      <div class="pdfbtns"><button class="mini" data-action="${out ? "admRelist" : "admUnlist"}" data-pid="${esc(x.id)}">${out ? "Volver a la lista" : "Quitar de la lista"}</button></div></div>`;
+      <div class="pdfbtns"><button class="mini" data-action="admPdfLive" data-pid="${esc(x.id)}" data-label="${esc(x.label)}">Resumen en PDF</button><button class="mini" data-action="${out ? "admRelist" : "admUnlist"}" data-pid="${esc(x.id)}">${out ? "Volver a la lista" : "Quitar de la lista"}</button></div></div>`;
   }
   if (!state.patients.length && !live.length) html += `<div class="empty"><p>Todavía no hay pacientes.</p></div>`;
   return html + `<button class="link wide" data-action="admDownloadList">Descargar pacientes.json actualizado</button></main>`;
@@ -736,7 +786,7 @@ function viewHistorico() {
       }).join("") + "</tbody></table></div>";
   }
   if (!list.length) html += `<p class="muted center">Sin resultados para ese filtro.</p>`;
-  html += `<button class="link wide" data-action="exportCsv">Exportar histórico (CSV)</button>`;
+  html += `<button class="primary wide" data-action="resumenPdf">Descargar resumen histórico (PDF)</button><button class="link wide" data-action="exportCsv">Exportar histórico (CSV)</button>`;
   return html + "</main>";
 }
 
@@ -903,8 +953,9 @@ function askText(title, placeholder, onOk) {
 function showMenu() {
   const p = patient();
   if (state.readOnly) {
-    showDialog("Menú", `<div class="menu"><button data-menu="logout">Cerrar sesión</button><p class="muted small">Por seguridad la sesión se cierra sola tras unos minutos sin actividad.</p></div>`);
+    showDialog("Menú", `<div class="menu"><button data-menu="resumen">Descargar resumen histórico (PDF)</button><button data-menu="logout">Cerrar sesión</button><p class="muted small">Por seguridad la sesión se cierra sola tras unos minutos sin actividad.</p></div>`);
     document.querySelector("#dlg .menu").addEventListener("click", (e) => {
+      if (e.target.closest("[data-menu=resumen]")) { document.getElementById("dlg")?.remove(); resumenDesdeEstado(); return; }
       if (!e.target.closest("[data-menu=logout]")) return;
       document.getElementById("dlg")?.remove(); leavePortal();
     });
@@ -925,7 +976,7 @@ function showMenu() {
       <button data-menu="export">Exportar copia de respaldo</button>
       <button data-menu="backup">Importar copia de respaldo</button>
       <p class="muted small">Los datos se guardan solo en este dispositivo. Los pacientes con contraseña se guardan cifrados, también en la copia de respaldo. Haz copias con regularidad, sobre todo antes de cambiar de teléfono.</p>
-    <p class="muted small center">Versión 17</p>
+    <p class="muted small center">Versión 18</p>
     </div>`);
   document.querySelector("#dlg .menu").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-menu]");
@@ -1114,6 +1165,14 @@ document.addEventListener("click", async (e) => {
   else if (a === "delStart") removePeriod(el.dataset.date);
   else if (a === "groupBy") { state.groupBy = el.dataset.mode; localStorage.setItem("groupBy", state.groupBy); render(); }
   else if (a === "exportCsv") exportCsv();
+  else if (a === "resumenPdf") resumenDesdeEstado();
+  else if (a === "admPdf") {
+    const p = state.patients.find((x) => x.id === Number(el.dataset.id));
+    if (!p) return;
+    if (p.published?.id) resumenDePublicado(p.published.id, p.published.label, isLocked(p) ? null : p.profile?.publishPw);
+    else { state.patientId = p.id; resumenDesdeEstado(); }   // sin publicar: se usa lo guardado en este dispositivo
+  }
+  else if (a === "admPdfLive") resumenDePublicado(el.dataset.pid, el.dataset.label, null);
   else if (a === "menu") showMenu();
   else if (a === "newPatient") newPatient();
   else if (a === "delWeight") { await db.del("weights", Number(el.dataset.id)); await load(); render(); }
